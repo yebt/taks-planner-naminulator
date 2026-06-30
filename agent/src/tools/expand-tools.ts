@@ -119,7 +119,7 @@ export async function doExpandTask(input: {
   const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(input.id) as Task | undefined;
   if (!task) throw new Error(`Task ${input.id} not found`);
 
-  const projectSlug = input.project_slug ?? planeClient.defaultProjectSlug;
+  const projectSlug = input.project_slug ?? planeClient.defaultProjectId;
   if (!projectSlug) throw new Error('project_slug is required (or set PLANE_DEFAULT_PROJECT_SLUG)');
 
   const title = `${task.type} - ${task.consecutive} - ${task.name}`;
@@ -140,7 +140,7 @@ export async function doExpandTask(input: {
     [LABEL_COLORS[task.type]],
   );
 
-  db.prepare('UPDATE tasks SET plane_issue_id = ?, plane_project_slug = ? WHERE id = ?').run(
+  db.prepare('UPDATE tasks SET plane_issue_id = ?, plane_project_id = ? WHERE id = ?').run(
     issueId,
     projectSlug,
     input.id,

@@ -15,7 +15,7 @@ export class PlaneClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly workspaceSlug: string;
-  readonly defaultProjectSlug: string;
+  readonly defaultProjectId: string;
   // state name (lower) → state ID, keyed by projectSlug
   private readonly stateCache = new Map<string, Map<string, string>>();
 
@@ -23,7 +23,7 @@ export class PlaneClient {
     this.baseUrl = (process.env.PLANE_BASE_URL ?? '').replace(/\/$/, '');
     this.apiKey = process.env.PLANE_API_TOKEN ?? '';
     this.workspaceSlug = process.env.PLANE_WORKSPACE_SLUG ?? '';
-    this.defaultProjectSlug = process.env.PLANE_DEFAULT_PROJECT_SLUG ?? '';
+    this.defaultProjectId = process.env.PLANE_DEFAULT_PROJECT_ID ?? '';
   }
 
   private headers(): Record<string, string> {

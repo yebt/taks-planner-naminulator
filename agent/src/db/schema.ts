@@ -14,7 +14,7 @@ export function initSchema(): void {
                           CHECK(priority IN ('low', 'medium', 'high', 'urgent')),
       description       TEXT,
       plane_issue_id    TEXT,
-      plane_project_slug TEXT,
+      plane_project_id TEXT,
       created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     );
 

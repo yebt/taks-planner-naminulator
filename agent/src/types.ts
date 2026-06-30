@@ -14,7 +14,7 @@ export interface Task {
   priority: TaskPriority;
   description: string | null;
   plane_issue_id: string | null;
-  plane_project_slug: string | null;
+  plane_project_id: string | null;
   created_at: string;
 }
 
@@ -37,7 +37,7 @@ export const taskSchema = v.object({
   priority: v.picklist(['low', 'medium', 'high', 'urgent'] as const),
   description: v.nullable(v.string()),
   plane_issue_id: v.nullable(v.string()),
-  plane_project_slug: v.nullable(v.string()),
+  plane_project_id: v.nullable(v.string()),
   created_at: v.string(),
 });
 

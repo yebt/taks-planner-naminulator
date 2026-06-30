@@ -13,9 +13,9 @@ async function setStatus(id: number, status: string): Promise<Task> {
 }
 
 async function syncToPlane(task: Task): Promise<void> {
-  if (task.plane_issue_id && task.plane_project_slug) {
+  if (task.plane_issue_id && task.plane_project_id) {
     await planeClient.updateIssueState(
-      task.plane_project_slug,
+      task.plane_project_id,
       task.plane_issue_id,
       planeStateMap[task.status]!,
     );
@@ -38,8 +38,8 @@ export async function doAddComment(
   const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task | undefined;
   if (!task) throw new Error(`Task ${id} not found`);
   let synced = false;
-  if (task.plane_issue_id && task.plane_project_slug) {
-    await planeClient.addComment(task.plane_project_slug, task.plane_issue_id, comment);
+  if (task.plane_issue_id && task.plane_project_id) {
+    await planeClient.addComment(task.plane_project_id, task.plane_issue_id, comment);
     synced = true;
   }
   return { success: true, synced };
@@ -103,8 +103,8 @@ export const addCommentTool = defineTool({
     if (!task) throw new Error(`Task ${input.id} not found`);
 
     let synced = false;
-    if (task.plane_issue_id && task.plane_project_slug) {
-      await planeClient.addComment(task.plane_project_slug, task.plane_issue_id, input.comment);
+    if (task.plane_issue_id && task.plane_project_id) {
+      await planeClient.addComment(task.plane_project_id, task.plane_issue_id, input.comment);
       synced = true;
     }
 
