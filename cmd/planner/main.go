@@ -1,10 +1,8 @@
-// Command planner is a personal planning agent: a chat REPL backed by an LLM
-// with tools that manipulate a local SQLite task board, plus a TUI board view.
+// Command planner is a personal planning agent: an interactive chat harness
+// backed by an LLM with tools that manipulate a local SQLite task board.
 package main
 
 import (
-	"bufio"
-	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -35,10 +33,8 @@ func main() {
 	}
 	var err error
 	switch cmd {
-	case "chat":
+	case "chat", "tui":
 		err = runChat()
-	case "tui":
-		err = runTUI()
 	case "config":
 		err = runConfig()
 	case "help", "-h", "--help":
@@ -57,12 +53,13 @@ func usage() {
 	fmt.Print(`planner — personal planning agent
 
 usage:
-  planner          start the chat agent (default)
-  planner tui      open the task board (read-only)
+  planner          start the interactive chat harness (default)
+  planner tui      alias for the chat harness
   planner config   write default config if missing and print its path
   planner help     show this help
 
-in chat, slash commands: /todos  /model <name>  /help  /quit
+in the harness: type / for the command menu — /todos /new /status /model /key /clear /quit
+API keys go in the config file (shown by 'planner config') or set them live with /key.
 `)
 }
 
@@ -102,35 +99,19 @@ func runConfig() error {
 		fmt.Println("config:", path)
 	}
 	fmt.Println("active provider:", cfg.ActiveProvider)
-	fmt.Print("providers: ")
 	names := make([]string, 0, len(cfg.Providers))
 	for n := range cfg.Providers {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	fmt.Println(strings.Join(names, ", "))
+	fmt.Println("providers:", strings.Join(names, ", "))
+	fmt.Println("\nset API keys by editing that file, or run the harness and use: /key <provider> <apikey>")
 	return nil
 }
 
-func runTUI() error {
-	cfg, err := config.Load(configPath())
-	if err != nil {
-		return err
-	}
-	st, err := openStore(cfg)
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-	tasks, err := st.List(context.Background(), store.Filter{})
-	if err != nil {
-		return err
-	}
-	return tui.Run(tasks)
-}
-
 func runChat() error {
-	cfg, err := config.Load(configPath())
+	path := configPath()
+	cfg, err := config.Load(path)
 	if err != nil {
 		return err
 	}
@@ -146,71 +127,15 @@ func runChat() error {
 
 	reg := tools.New(st)
 	ag := agent.New(provider, reg, systemPrompt)
-	ctx := context.Background()
 
-	fmt.Printf("planner — provider: %s (type /help)\n", ag.Provider())
-	sc := bufio.NewScanner(os.Stdin)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for {
-		fmt.Print("> ")
-		if !sc.Scan() {
-			fmt.Println()
-			return nil
-		}
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "/") {
-			if quit := handleSlash(ctx, line, cfg, ag, st); quit {
-				return nil
-			}
-			continue
-		}
-		reply, err := ag.Send(ctx, line)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			continue
-		}
-		fmt.Println(reply)
-	}
-}
-
-func handleSlash(ctx context.Context, line string, cfg config.Config, ag *agent.Agent, st store.TaskStore) (quit bool) {
-	fields := strings.Fields(line)
-	switch fields[0] {
-	case "/quit", "/exit", "/q":
-		return true
-	case "/help":
-		fmt.Println("/todos  list tasks\n/model <name>  switch provider\n/quit  exit")
-	case "/todos":
-		tasks, err := st.List(ctx, store.Filter{})
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			return false
-		}
-		if len(tasks) == 0 {
-			fmt.Println("(no tasks)")
-		}
-		for _, t := range tasks {
-			fmt.Printf("  %d [%s] %-6s %s (%s)\n", t.ID, t.Label, t.Type, t.Title, t.Status)
-		}
-	case "/model":
-		if len(fields) < 2 {
-			fmt.Println("usage: /model <name>")
-			return false
-		}
-		p, err := buildProvider(cfg, fields[1])
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			return false
-		}
-		ag.SetProvider(p)
-		fmt.Println("provider:", p.Name())
-	default:
-		fmt.Println("unknown command; try /help")
-	}
-	return false
+	return tui.RunChat(tui.ChatDeps{
+		Cfg:        &cfg,
+		ConfigPath: path,
+		Agent:      ag,
+		Store:      st,
+		Tools:      reg,
+		Build:      buildProvider,
+	})
 }
 
 func buildProvider(cfg config.Config, name string) (llm.Provider, error) {

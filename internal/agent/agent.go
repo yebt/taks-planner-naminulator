@@ -37,6 +37,15 @@ func New(p llm.Provider, tools ToolDispatcher, systemPrompt string) *Agent {
 // conversation history is preserved.
 func (a *Agent) SetProvider(p llm.Provider) { a.provider = p }
 
+// Reset clears the conversation, keeping the system prompt (used by /clear).
+func (a *Agent) Reset() {
+	if len(a.messages) > 0 && a.messages[0].Role == llm.RoleSystem {
+		a.messages = a.messages[:1:1]
+		return
+	}
+	a.messages = nil
+}
+
 // Provider returns the active provider name.
 func (a *Agent) Provider() string { return a.provider.Name() }
 
