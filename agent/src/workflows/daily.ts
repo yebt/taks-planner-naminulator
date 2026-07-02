@@ -6,7 +6,7 @@ import { createDaily, pushDaily } from '../tools/daily-tools';
 
 export default defineWorkflow({
   agent: defineAgent(() => ({
-    model: 'openrouter/moonshotai/kimi-k2.6',
+    model: `kimi/${process.env.KIMI_MODEL ?? 'kimi-k2.7-code'}`,
     instructions: 'Daily report generation workflow agent',
   })),
   input: v.object({

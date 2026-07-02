@@ -1,5 +1,6 @@
 import '../app';
 import '../db/schema';
+import type { MiddlewareHandler } from 'hono';
 import { defineAgent } from '@flue/runtime';
 import { addTaskTool, listTasksTool, getTaskTool, updateTaskTool, deleteTaskTool } from '../tools/task-tools';
 import { markDoneTool, markInProgressTool, pauseTaskTool, cancelTaskTool, addCommentTool } from '../tools/status-tools';
@@ -7,7 +8,7 @@ import { createDailyTool, getDailyTool, pushDailyTool } from '../tools/daily-too
 import { expandTaskTool } from '../tools/expand-tools';
 
 export default defineAgent(() => ({
-  model: 'openrouter/moonshotai/kimi-k2.6',
+  model: `kimi/${process.env.KIMI_MODEL ?? 'kimi-k2.7-code'}`,
   instructions: `Eres un asistente de gestión de tareas en español. Ayudás al usuario a administrar sus tareas de desarrollo de software.
 
 Podés:
@@ -42,3 +43,5 @@ Cuando listés tareas, mostrá la información de forma clara y ordenada.`,
     expandTaskTool,
   ],
 }));
+
+export const route: MiddlewareHandler = async (_c, next) => next();

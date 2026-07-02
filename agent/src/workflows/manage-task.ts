@@ -6,7 +6,7 @@ import { applyStatus, doAddComment } from '../tools/status-tools';
 
 export default defineWorkflow({
   agent: defineAgent(() => ({
-    model: 'openrouter/moonshotai/kimi-k2.6',
+    model: `kimi/${process.env.KIMI_MODEL ?? 'kimi-k2.7-code'}`,
     instructions: 'Task management workflow agent',
   })),
   input: v.object({

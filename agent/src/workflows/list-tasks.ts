@@ -7,7 +7,7 @@ import { taskSchema, type Task } from '../types';
 
 export default defineWorkflow({
   agent: defineAgent(() => ({
-    model: 'openrouter/moonshotai/kimi-k2.6',
+    model: `kimi/${process.env.KIMI_MODEL ?? 'kimi-k2.7-code'}`,
     instructions: 'Task listing workflow agent',
   })),
   input: v.object({

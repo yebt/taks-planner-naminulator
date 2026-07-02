@@ -6,7 +6,7 @@ import { doExpandTask } from '../tools/expand-tools';
 
 export default defineWorkflow({
   agent: defineAgent(() => ({
-    model: 'openrouter/moonshotai/kimi-k2.6',
+    model: `kimi/${process.env.KIMI_MODEL ?? 'kimi-k2.7-code'}`,
     instructions: 'Task expansion to Plane.io workflow agent',
   })),
   input: v.object({
