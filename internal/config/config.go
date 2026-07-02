@@ -1,0 +1,98 @@
+// Package config loads and saves the planner configuration (providers, db path,
+// Plane settings) as JSON under the user config dir.
+package config
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+
+	"github.com/webcloster-dev/planner/internal/llm"
+)
+
+// PlaneConfig holds the self-hosted Plane connection settings. WorkspaceSlug is
+// asked from the user (can't be inferred via API); ProjectID is selected from
+// the API or entered manually.
+type PlaneConfig struct {
+	APIToken      string            `json:"api_token,omitempty"`
+	WorkspaceSlug string            `json:"workspace_slug,omitempty"`
+	ProjectID     string            `json:"project_id,omitempty"`
+	StateDefaults map[string]string `json:"state_defaults,omitempty"` // group -> default state name
+}
+
+// Config is the top-level app config.
+type Config struct {
+	ActiveProvider string                        `json:"active_provider"`
+	Providers      map[string]llm.ProviderConfig `json:"providers"`
+	DBPath         string                        `json:"db_path"`
+	Plane          PlaneConfig                   `json:"plane"`
+}
+
+// Default returns a ready-to-run config: Ollama active (free, local) plus
+// stub entries for the paid providers so /model can switch once keys are set.
+func Default() Config {
+	return Config{
+		ActiveProvider: "ollama",
+		DBPath:         DefaultDBPath(),
+		Providers: map[string]llm.ProviderConfig{
+			"ollama":   {Kind: "custom", Label: "ollama", BaseURL: "http://localhost:11434/v1", APIKey: "ollama", Model: "llama3.1"},
+			"openai":   {Kind: "openai", Label: "openai", Model: "gpt-4o-mini"},
+			"moonshot": {Kind: "moonshot", Label: "moonshot", Model: "moonshot-v1-8k"},
+			"kimi":     {Kind: "kimi", Label: "kimi", Model: "kimi-k2-0711-preview"},
+			"claude":   {Kind: "claude", Label: "claude", Model: "claude-opus-4-8"},
+		},
+	}
+}
+
+// DefaultDir is the planner config directory (e.g. ~/.config/planner).
+func DefaultDir() string {
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		dir = filepath.Join(os.Getenv("HOME"), ".config")
+	}
+	return filepath.Join(dir, "planner")
+}
+
+// DefaultPath is the config file path.
+func DefaultPath() string { return filepath.Join(DefaultDir(), "config.json") }
+
+// DefaultDBPath is the SQLite database path.
+func DefaultDBPath() string { return filepath.Join(DefaultDir(), "planner.db") }
+
+// Load reads the config, returning defaults if the file does not exist.
+func Load(path string) (Config, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return Default(), nil
+	}
+	if err != nil {
+		return Config{}, err
+	}
+	var c Config
+	if err := json.Unmarshal(data, &c); err != nil {
+		return Config{}, err
+	}
+	if len(c.Providers) == 0 {
+		c.Providers = Default().Providers
+	}
+	if c.DBPath == "" {
+		c.DBPath = DefaultDBPath()
+	}
+	if c.ActiveProvider == "" {
+		c.ActiveProvider = Default().ActiveProvider
+	}
+	return c, nil
+}
+
+// Save writes the config as indented JSON, creating the directory if needed.
+func Save(path string, c Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
