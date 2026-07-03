@@ -41,7 +41,7 @@ type ChatDeps struct {
 // RunChat starts the interactive harness.
 func RunChat(deps ChatDeps) error {
 	m := newChatModel(deps)
-	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	return err
 }
 
@@ -53,6 +53,12 @@ func newChatModel(deps ChatDeps) *chatModel {
 	ta.CharLimit = 0
 	// Enter submits; Alt+Enter inserts a newline (multi-line input).
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "newline"))
+	inputBG := lipgloss.Color("236")
+	ta.FocusedStyle.Base = lipgloss.NewStyle().Background(inputBG)
+	ta.FocusedStyle.Text = lipgloss.NewStyle().Background(inputBG)
+	ta.FocusedStyle.Prompt = lipgloss.NewStyle().Background(inputBG).Foreground(lipgloss.Color("111"))
+	ta.FocusedStyle.Placeholder = lipgloss.NewStyle().Background(inputBG).Foreground(lipgloss.Color("240"))
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(lipgloss.Color("238"))
 	ta.Focus()
 
 	m := &chatModel{
@@ -137,6 +143,11 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		return m, cmd
 	}
 
 	var cmd tea.Cmd
@@ -166,14 +177,10 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.acceptSuggestion()
 			return m, nil
 		case "enter":
-			completed := completedValue(m.suggestions[m.selected])
-			if completed == m.ta.Value() {
+			if completedValue(m.suggestions[m.selected]) == m.ta.Value() {
 				return m.submit()
 			}
-			m.ta.SetValue(completed)
-			m.suggestions = computeSuggestions(m.ta.Value(), m.providerNames())
-			m.selected = 0
-			m.layout()
+			m.acceptSuggestion()
 			return m, nil
 		case "esc":
 			m.suggestions = nil
@@ -282,6 +289,7 @@ func (m *chatModel) historyNext() {
 var baseCommands = []suggestion{
 	{"/help", "show commands"},
 	{"/todos", "list tasks"},
+	{"/task", "/task <id> — show a task in full"},
 	{"/new", "/new <TYPE> <title> — create a task (no LLM)"},
 	{"/status", "/status <id> <status> — change a task status"},
 	{"/model", "switch LLM provider"},
@@ -298,7 +306,7 @@ var baseCommands = []suggestion{
 
 var needsArg = map[string]bool{
 	"/new": true, "/status": true, "/model": true, "/key": true,
-	"/load": true, "/recall": true, "/remember": true,
+	"/load": true, "/recall": true, "/remember": true, "/task": true,
 }
 
 func (m *chatModel) runCommand(val string) tea.Cmd {
@@ -327,6 +335,13 @@ func (m *chatModel) runCommand(val string) tea.Cmd {
 
 	case "/todos":
 		m.showTodos(ctx)
+
+	case "/task":
+		if len(fields) < 2 {
+			m.add("err", "usage: /task <id>")
+			break
+		}
+		m.showTask(ctx, fields[1])
 
 	case "/new":
 		if len(fields) < 3 {
@@ -440,7 +455,51 @@ func (m *chatModel) showTodos(ctx context.Context) {
 		b.WriteString(fmt.Sprintf("%3d  [%s] %-6s %-32s %s\n",
 			t.ID, t.Label, t.Type, trunc(t.Title, 32), t.Status))
 	}
+	b.WriteString("\nuse: /task <id> for detail")
 	m.add("sys", strings.TrimRight(b.String(), "\n"))
+}
+
+// showTask renders one task expanded following the activity template.
+func (m *chatModel) showTask(ctx context.Context, idStr string) {
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		m.add("err", "id must be a number")
+		return
+	}
+	t, err := m.deps.Store.Get(ctx, id)
+	if err != nil {
+		m.add("err", err.Error())
+		return
+	}
+	head := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111"))
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213"))
+	w := m.vp.Width
+	if w < 10 {
+		w = 10
+	}
+	wrap := lipgloss.NewStyle().Width(w)
+
+	var b strings.Builder
+	b.WriteString(title.Render(fmt.Sprintf("%s · %s · #%d", t.Type, t.Label, t.ID)) + "\n")
+	b.WriteString(title.Render(t.Title) + "\n\n")
+	b.WriteString(head.Render("Estado") + "\n")
+	b.WriteString(fmt.Sprintf("- status: %s\n- state: %s\n- work item: %s\n\n",
+		t.Status, orDash(t.State), orDash(t.WorkItemID)))
+	b.WriteString(head.Render("Descripción") + "\n")
+	b.WriteString(wrap.Render(orDash(t.Description)) + "\n\n")
+	b.WriteString(head.Render("Fechas") + "\n")
+	b.WriteString(fmt.Sprintf("- creada: %s\n- actualizada: %s\n- última interacción: %s",
+		t.CreatedAt.Local().Format("2006-01-02 15:04"),
+		t.UpdatedAt.Local().Format("2006-01-02 15:04"),
+		t.TouchedAt.Local().Format("2006-01-02 15:04")))
+	m.add("raw", b.String())
+}
+
+func orDash(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "—"
+	}
+	return s
 }
 
 func (m *chatModel) switchModel(name string) {
@@ -586,20 +645,20 @@ func computeSuggestions(val string, providers []string) []suggestion {
 			}
 		}
 	case fields[0] == "/model":
-		prefix := ""
-		if len(fields) > 1 {
-			prefix = fields[1]
+		if !completingArg(fields, endsSpace) {
+			break
 		}
+		prefix := argPrefix(fields)
 		for _, name := range providers {
 			if strings.HasPrefix(name, prefix) {
 				out = append(out, suggestion{"/model " + name, "switch to " + name})
 			}
 		}
 	case fields[0] == "/key":
-		prefix := ""
-		if len(fields) > 1 {
-			prefix = fields[1]
+		if !completingArg(fields, endsSpace) {
+			break
 		}
+		prefix := argPrefix(fields)
 		for _, name := range providers {
 			if strings.HasPrefix(name, prefix) {
 				out = append(out, suggestion{"/key " + name + " ", "set API key for " + name})
@@ -612,10 +671,25 @@ func computeSuggestions(val string, providers []string) []suggestion {
 	return out
 }
 
+// completingArg reports whether the cursor is still on the first argument token
+// (so we keep suggesting values for it); once the arg is filled we stop.
+func completingArg(fields []string, endsSpace bool) bool {
+	return (len(fields) == 1 && endsSpace) || (len(fields) == 2 && !endsSpace)
+}
+
+func argPrefix(fields []string) string {
+	if len(fields) == 2 {
+		return fields[1]
+	}
+	return ""
+}
+
 func completedValue(sel suggestion) string {
 	val := sel.full
-	first := strings.Fields(val)[0]
-	if needsArg[first] && !strings.HasSuffix(val, " ") {
+	if len(strings.Fields(val)) > 1 {
+		return val // already carries its argument (e.g. "/model kimi", "/key kimi ")
+	}
+	if needsArg[val] && !strings.HasSuffix(val, " ") {
 		val += " "
 	}
 	return val
@@ -625,8 +699,15 @@ func (m *chatModel) acceptSuggestion() {
 	if m.selected >= len(m.suggestions) {
 		return
 	}
-	m.ta.SetValue(completedValue(m.suggestions[m.selected]))
-	m.suggestions = computeSuggestions(m.ta.Value(), m.providerNames())
+	val := completedValue(m.suggestions[m.selected])
+	m.ta.SetValue(val)
+	next := computeSuggestions(val, m.providerNames())
+	// If the only remaining suggestion is exactly what we just completed, the
+	// command is ready — close the menu so Enter submits instead of re-selecting.
+	if len(next) == 1 && next[0].full == val {
+		next = nil
+	}
+	m.suggestions = next
 	m.selected = 0
 	m.layout()
 }
@@ -644,10 +725,13 @@ func (m *chatModel) providerNames() []string {
 
 func (m *chatModel) add(role, text string) {
 	m.entries = append(m.entries, entry{role: role, text: text})
-	m.refresh()
+	m.setContent()
+	m.vp.GotoBottom() // new content jumps to the bottom…
 }
 
-func (m *chatModel) refresh() {
+// setContent rebuilds the viewport body WITHOUT moving the scroll position, so
+// scrolling up survives keystrokes and relayouts.
+func (m *chatModel) setContent() {
 	w := m.vp.Width
 	if w < 10 {
 		w = 10
@@ -664,12 +748,13 @@ func (m *chatModel) refresh() {
 			blocks = append(blocks, cmdStyle.Render(e.text))
 		case "err":
 			blocks = append(blocks, body.Inherit(errStyle).Render("error: "+e.text))
+		case "raw":
+			blocks = append(blocks, e.text) // pre-styled/wrapped, passthrough
 		default:
 			blocks = append(blocks, body.Inherit(sysStyle).Render(e.text))
 		}
 	}
 	m.vp.SetContent(strings.Join(blocks, "\n\n"))
-	m.vp.GotoBottom()
 }
 
 func (m *chatModel) layout() {
@@ -684,7 +769,7 @@ func (m *chatModel) layout() {
 	}
 	m.vp.Width = m.width
 	m.vp.Height = vpH
-	m.refresh()
+	m.setContent() // keep scroll position on resize / keystroke
 }
 
 func (m *chatModel) View() string {
@@ -712,7 +797,7 @@ func (m *chatModel) footer() string {
 	if m.thinking {
 		return thinkStyle.Render("⏳ thinking…")
 	}
-	return helpStyle.Render("enter send · alt+enter newline · / commands · ↑/↓ history · ctrl+c quit")
+	return helpStyle.Render("enter send · alt+enter newline · ↑/↓ history · pgup/pgdn/wheel scroll · / commands · ctrl+c quit")
 }
 
 func (m *chatModel) statusBar() string {

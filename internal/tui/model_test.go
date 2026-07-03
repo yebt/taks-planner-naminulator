@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -137,6 +138,51 @@ func TestConversationSaveAndLoad(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("entries not rebuilt from loaded conversation")
+	}
+}
+
+func TestKeyFlowClosesMenu(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.ta.SetValue("/key ")
+	m.suggestions = computeSuggestions(m.ta.Value(), m.providerNames())
+	if len(m.suggestions) == 0 {
+		t.Fatal("expected provider suggestions after '/key '")
+	}
+	for i, s := range m.suggestions {
+		if strings.Contains(s.full, "kimi") {
+			m.selected = i
+		}
+	}
+	m.acceptSuggestion()
+	if m.ta.Value() != "/key kimi " {
+		t.Fatalf("expected '/key kimi ', got %q", m.ta.Value())
+	}
+	if len(m.suggestions) != 0 {
+		t.Fatalf("menu should close after choosing provider, got %v", m.suggestions)
+	}
+	// Typing the key must not re-open the menu.
+	m.ta.SetValue("/key kimi sk-secret")
+	if s := computeSuggestions(m.ta.Value(), m.providerNames()); len(s) != 0 {
+		t.Fatalf("menu re-opened while typing key: %v", s)
+	}
+}
+
+func TestTaskDetail(t *testing.T) {
+	m, st := newTestModel(t)
+	m.ta.SetValue("/new FEAT Login screen")
+	m.submit()
+	tasks, err := st.List(context.Background(), store.Filter{})
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("setup failed: err=%v tasks=%d", err, len(tasks))
+	}
+	m.ta.SetValue("/task " + strconv.FormatInt(tasks[0].ID, 10))
+	m.submit()
+	last := m.entries[len(m.entries)-1]
+	if last.role != "raw" {
+		t.Fatalf("expected raw detail entry, got role %q", last.role)
+	}
+	if !strings.Contains(last.text, "Login screen") || !strings.Contains(last.text, "Estado") {
+		t.Fatalf("detail missing expected content: %q", last.text)
 	}
 }
 
