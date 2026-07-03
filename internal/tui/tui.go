@@ -49,18 +49,18 @@ func RunChat(deps ChatDeps) error {
 func newChatModel(deps ChatDeps) *chatModel {
 	ta := textarea.New()
 	ta.Placeholder = "tell me what you're working on…  (/ for commands)"
-	ta.Prompt = "▌ "
+	// ta.Prompt = "▌ "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	// Enter submits; Alt+Enter inserts a newline (multi-line input).
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "newline"))
-	fill := lipgloss.NewStyle().Background(inputBG)
-	ta.FocusedStyle.Base = fill
-	ta.FocusedStyle.Text = fill
-	ta.FocusedStyle.CursorLine = fill                                                         // single tone — no diff-looking band
-	ta.FocusedStyle.EndOfBuffer = lipgloss.NewStyle().Background(inputBG).Foreground(inputBG) // hide the "~"
-	ta.FocusedStyle.Prompt = lipgloss.NewStyle().Background(inputBG).Foreground(lipgloss.Color("111"))
-	ta.FocusedStyle.Placeholder = lipgloss.NewStyle().Background(inputBG).Foreground(lipgloss.Color("245"))
+	// fill := lipgloss.NewStyle().Background(inputBG)
+	// ta.FocusedStyle.Base = fill
+	// ta.FocusedStyle.Text = fill
+	// ta.FocusedStyle.CursorLine = fill                                                         // single tone — no diff-looking band
+	// ta.FocusedStyle.EndOfBuffer = lipgloss.NewStyle().Background(inputBG).Foreground(inputBG) // hide the "~"
+	// ta.FocusedStyle.Prompt = lipgloss.NewStyle().Background(inputBG).Foreground(lipgloss.Color("111"))
+	// ta.FocusedStyle.Placeholder = lipgloss.NewStyle().Background(inputBG).Foreground(lipgloss.Color("245"))
 	ta.Focus()
 
 	m := &chatModel{
@@ -89,9 +89,11 @@ var (
 	sugStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 	selStyle  = lipgloss.NewStyle().Bold(true).
 			Foreground(lipgloss.Color("231")).Background(lipgloss.Color("62"))
-	thinkStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
-	toolStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("108"))
-	inputBG    = lipgloss.Color("236")
+	thinkStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	toolStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("108"))
+	dividerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	userBubbleBG = lipgloss.Color("236")
+	inputBG      = lipgloss.Color("236")
 )
 
 // --- model ---
@@ -829,11 +831,12 @@ func (m *chatModel) setContent() {
 		w = 10
 	}
 	body := lipgloss.NewStyle().Width(w)
+	bubble := lipgloss.NewStyle().Background(userBubbleBG).Foreground(lipgloss.Color("252")).Padding(0, 1).Width(w)
 	blocks := make([]string, 0, len(m.entries))
 	for _, e := range m.entries {
 		switch e.role {
 		case "you":
-			blocks = append(blocks, youLabel.Render("you")+"\n"+body.Render(e.text))
+			blocks = append(blocks, youLabel.Render("› you")+"\n"+bubble.Render(e.text))
 		case "planner":
 			blocks = append(blocks, botLabel.Render("planner")+"\n"+body.Render(e.text))
 		case "cmd":
@@ -855,9 +858,20 @@ func (m *chatModel) layout() {
 	if !m.ready {
 		return
 	}
-	m.ta.SetWidth(m.width - 2)
-	m.ta.SetHeight(3)
-	vpH := m.height - len(m.suggestions) - 7 // header+input+help+status+margins
+	m.ta.SetWidth(m.width - 1)
+	// Input grows with the number of lines (slim when empty, up to 6).
+	inputH := strings.Count(m.ta.Value(), "\n") + 1
+	// if inputH < 1 {
+	// 	inputH = 1
+	// }
+	// if inputH > 6 {
+	// 	inputH = 6
+	// }
+
+	inputH = 3
+	m.ta.SetHeight(inputH)
+	// leaves room for: header + divider + input + help + status + margin
+	vpH := m.height - len(m.suggestions) - inputH - 5
 	if vpH < 3 {
 		vpH = 3
 	}
@@ -875,12 +889,16 @@ func (m *chatModel) View() string {
 	b.WriteString("\n")
 	b.WriteString(m.vp.View())
 	b.WriteString("\n")
+	// Separator between the conversation and the input.
+	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.width)))
+	b.WriteString("\n")
 	if len(m.suggestions) > 0 {
 		b.WriteString(m.renderSuggestions())
 		b.WriteString("\n")
 	}
 	// Wrap the input in a full-width background so the panel is uniform.
-	b.WriteString(lipgloss.NewStyle().Width(m.width).Background(inputBG).Render(m.ta.View()))
+	// b.WriteString(lipgloss.NewStyle().Width(m.width).Background(inputBG).Render(m.ta.View()))
+	b.WriteString(lipgloss.NewStyle().Width(m.width).Render(m.ta.View()))
 	b.WriteString("\n")
 	b.WriteString(m.footer())
 	b.WriteString("\n")

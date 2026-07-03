@@ -307,16 +307,20 @@ func (r *Registry) setDetails(ctx context.Context, args string) (string, error) 
 // --- helpers ---
 
 type taskView struct {
-	ID     int64  `json:"id"`
-	Label  string `json:"label"`
-	Type   string `json:"type"`
-	Title  string `json:"title"`
-	Status string `json:"status"`
-	State  string `json:"state,omitempty"`
+	ID       int64  `json:"id"`
+	Label    string `json:"label"`
+	Type     string `json:"type"`
+	Title    string `json:"title"`
+	Status   string `json:"status"`
+	State    string `json:"state,omitempty"`
+	WorkItem string `json:"work_item,omitempty"` // Plane id; empty = not synced yet
 }
 
 func view(t domain.Task) taskView {
-	return taskView{ID: t.ID, Label: t.Label, Type: string(t.Type), Title: t.Title, Status: string(t.Status), State: t.State}
+	return taskView{
+		ID: t.ID, Label: t.Label, Type: string(t.Type), Title: t.Title,
+		Status: string(t.Status), State: t.State, WorkItem: t.WorkItemID,
+	}
 }
 
 func marshal(v any) (string, error) {
