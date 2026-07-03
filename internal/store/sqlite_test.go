@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -69,6 +70,62 @@ func TestSQLiteCreateGetUpdateList(t *testing.T) {
 	}
 	if len(done) != 1 || done[0].Title != "bug" {
 		t.Fatalf("filter failed: %+v", done)
+	}
+}
+
+func TestDetailsRoundtrip(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	created, err := s.Create(ctx, domain.Task{
+		Label: "feat-x", Type: domain.TypeFeat, Title: "X", Status: domain.StatusTodo,
+		Details: domain.TaskDetails{
+			Objective:          "obj",
+			AsA:                "user",
+			AcceptanceCriteria: []string{"a", "b"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Details.Objective != "obj" || got.Details.AsA != "user" {
+		t.Fatalf("details roundtrip failed: %+v", got.Details)
+	}
+	if len(got.Details.AcceptanceCriteria) != 2 {
+		t.Fatalf("acceptance criteria not restored: %+v", got.Details.AcceptanceCriteria)
+	}
+}
+
+func TestMigrateAddsDetailsColumnToOldDB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	// Simulate a pre-existing DB created before the details column existed.
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL, type TEXT NOT NULL,
+      title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT '', work_item_id TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, touched_at INTEGER NOT NULL)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := OpenSQLite(path) // migrate() must ALTER TABLE ADD COLUMN details
+	if err != nil {
+		t.Fatalf("open/migrate on old DB failed: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.Create(context.Background(), domain.Task{
+		Label: "l", Type: domain.TypeFeat, Title: "t", Status: domain.StatusTodo,
+		Details: domain.TaskDetails{Objective: "o"},
+	}); err != nil {
+		t.Fatalf("create after migration failed: %v", err)
 	}
 }
 

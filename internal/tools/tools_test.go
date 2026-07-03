@@ -62,6 +62,33 @@ func TestCreateAndListAndStatus(t *testing.T) {
 	}
 }
 
+func TestSetDetails(t *testing.T) {
+	ctx := context.Background()
+	r := newReg(t)
+	out, err := r.Dispatch(ctx, "create_task", `{"type":"feat","title":"Login"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created taskView
+	_ = json.Unmarshal([]byte(out), &created)
+
+	_, err = r.Dispatch(ctx, "set_details", `{"id":`+itoa(created.ID)+`,"objective":"Let users log in","as_a":"user","acceptance_criteria":["Dado X Cuando Y Entonces Z"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// verify persistence through the store
+	tk, err := r.store.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tk.Details.Objective != "Let users log in" || tk.Details.AsA != "user" {
+		t.Fatalf("details not persisted: %+v", tk.Details)
+	}
+	if len(tk.Details.AcceptanceCriteria) != 1 {
+		t.Fatalf("acceptance criteria not persisted: %+v", tk.Details.AcceptanceCriteria)
+	}
+}
+
 func TestCreateInvalidType(t *testing.T) {
 	r := newReg(t)
 	if _, err := r.Dispatch(context.Background(), "create_task", `{"type":"nope","title":"x"}`); err == nil {
@@ -79,8 +106,8 @@ func TestUnknownTool(t *testing.T) {
 func TestDefinitionsShape(t *testing.T) {
 	r := newReg(t)
 	defs := r.Definitions()
-	if len(defs) != 4 {
-		t.Fatalf("expected 4 tools, got %d", len(defs))
+	if len(defs) != 5 {
+		t.Fatalf("expected 5 tools, got %d", len(defs))
 	}
 	for _, d := range defs {
 		if d.Parameters["type"] != "object" {

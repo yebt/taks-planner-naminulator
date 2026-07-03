@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -47,7 +48,8 @@ func (s *SQLite) migrate() error {
   work_item_id TEXT    NOT NULL DEFAULT '',
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL,
-  touched_at   INTEGER NOT NULL
+  touched_at   INTEGER NOT NULL,
+  details      TEXT    NOT NULL DEFAULT ''
 );`,
 		`CREATE TABLE IF NOT EXISTS conversations (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,7 +72,34 @@ func (s *SQLite) migrate() error {
 			return err
 		}
 	}
-	return nil
+	// Add columns introduced after the initial schema (for existing DBs).
+	return s.ensureColumn("tasks", "details", "TEXT NOT NULL DEFAULT ''")
+}
+
+// ensureColumn adds a column if the table doesn't already have it.
+func (s *SQLite) ensureColumn(table, col, decl string) error {
+	rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == col {
+			return rows.Close()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec("ALTER TABLE " + table + " ADD COLUMN " + col + " " + decl)
+	return err
 }
 
 // Close closes the underlying database.
@@ -86,11 +115,12 @@ func (s *SQLite) Create(ctx context.Context, t domain.Task) (domain.Task, error)
 	if t.TouchedAt.IsZero() {
 		t.TouchedAt = now
 	}
+	details, _ := json.Marshal(t.Details)
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO tasks (label,type,title,description,status,state,work_item_id,created_at,updated_at,touched_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO tasks (label,type,title,description,status,state,work_item_id,created_at,updated_at,touched_at,details)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		t.Label, string(t.Type), t.Title, t.Description, string(t.Status), t.State, t.WorkItemID,
-		t.CreatedAt.Unix(), t.UpdatedAt.Unix(), t.TouchedAt.Unix())
+		t.CreatedAt.Unix(), t.UpdatedAt.Unix(), t.TouchedAt.Unix(), string(details))
 	if err != nil {
 		return domain.Task{}, err
 	}
@@ -102,7 +132,7 @@ func (s *SQLite) Create(ctx context.Context, t domain.Task) (domain.Task, error)
 	return t, nil
 }
 
-const selectCols = `id,label,type,title,description,status,state,work_item_id,created_at,updated_at,touched_at`
+const selectCols = `id,label,type,title,description,status,state,work_item_id,created_at,updated_at,touched_at,details`
 
 // Get fetches a single task by id.
 func (s *SQLite) Get(ctx context.Context, id int64) (domain.Task, error) {
@@ -151,11 +181,12 @@ func (s *SQLite) List(ctx context.Context, f Filter) ([]domain.Task, error) {
 // Update writes a task and bumps updated_at/touched_at to now.
 func (s *SQLite) Update(ctx context.Context, t domain.Task) error {
 	now := time.Now().UTC()
+	details, _ := json.Marshal(t.Details)
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE tasks SET label=?,type=?,title=?,description=?,status=?,state=?,work_item_id=?,updated_at=?,touched_at=?
+		`UPDATE tasks SET label=?,type=?,title=?,description=?,status=?,state=?,work_item_id=?,updated_at=?,touched_at=?,details=?
 		 WHERE id=?`,
 		t.Label, string(t.Type), t.Title, t.Description, string(t.Status), t.State, t.WorkItemID,
-		now.Unix(), now.Unix(), t.ID)
+		now.Unix(), now.Unix(), string(details), t.ID)
 	if err != nil {
 		return err
 	}
@@ -177,11 +208,11 @@ type scanner interface {
 func scanRow(sc scanner) (domain.Task, error) {
 	var (
 		t                         domain.Task
-		typ, status               string
+		typ, status, details      string
 		created, updated, touched int64
 	)
 	err := sc.Scan(&t.ID, &t.Label, &typ, &t.Title, &t.Description, &status, &t.State, &t.WorkItemID,
-		&created, &updated, &touched)
+		&created, &updated, &touched, &details)
 	if err != nil {
 		return domain.Task{}, err
 	}
@@ -190,6 +221,9 @@ func scanRow(sc scanner) (domain.Task, error) {
 	t.CreatedAt = time.Unix(created, 0).UTC()
 	t.UpdatedAt = time.Unix(updated, 0).UTC()
 	t.TouchedAt = time.Unix(touched, 0).UTC()
+	if details != "" && details != "null" {
+		_ = json.Unmarshal([]byte(details), &t.Details)
+	}
 	return t, nil
 }
 

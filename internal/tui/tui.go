@@ -20,6 +20,7 @@ import (
 
 	"github.com/webcloster-dev/planner/internal/agent"
 	"github.com/webcloster-dev/planner/internal/config"
+	"github.com/webcloster-dev/planner/internal/domain"
 	"github.com/webcloster-dev/planner/internal/llm"
 	"github.com/webcloster-dev/planner/internal/memory"
 	"github.com/webcloster-dev/planner/internal/store"
@@ -53,12 +54,13 @@ func newChatModel(deps ChatDeps) *chatModel {
 	ta.CharLimit = 0
 	// Enter submits; Alt+Enter inserts a newline (multi-line input).
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "newline"))
-	inputBG := lipgloss.Color("236")
-	ta.FocusedStyle.Base = lipgloss.NewStyle().Background(inputBG)
-	ta.FocusedStyle.Text = lipgloss.NewStyle().Background(inputBG)
+	fill := lipgloss.NewStyle().Background(inputBG)
+	ta.FocusedStyle.Base = fill
+	ta.FocusedStyle.Text = fill
+	ta.FocusedStyle.CursorLine = fill                                                         // single tone — no diff-looking band
+	ta.FocusedStyle.EndOfBuffer = lipgloss.NewStyle().Background(inputBG).Foreground(inputBG) // hide the "~"
 	ta.FocusedStyle.Prompt = lipgloss.NewStyle().Background(inputBG).Foreground(lipgloss.Color("111"))
-	ta.FocusedStyle.Placeholder = lipgloss.NewStyle().Background(inputBG).Foreground(lipgloss.Color("240"))
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(lipgloss.Color("238"))
+	ta.FocusedStyle.Placeholder = lipgloss.NewStyle().Background(inputBG).Foreground(lipgloss.Color("245"))
 	ta.Focus()
 
 	m := &chatModel{
@@ -88,6 +90,8 @@ var (
 	selStyle  = lipgloss.NewStyle().Bold(true).
 			Foreground(lipgloss.Color("231")).Background(lipgloss.Color("62"))
 	thinkStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	toolStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("108"))
+	inputBG    = lipgloss.Color("236")
 )
 
 // --- model ---
@@ -135,7 +139,10 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.add("err", msg.err.Error())
 		} else {
-			m.add("planner", strings.TrimSpace(msg.text))
+			m.renderToolEvents()
+			if txt := strings.TrimSpace(msg.text); txt != "" {
+				m.add("planner", txt)
+			}
 			m.autosave()
 		}
 		m.layout()
@@ -242,6 +249,42 @@ func sendCmd(a *agent.Agent, input string) tea.Cmd {
 	return func() tea.Msg {
 		out, err := a.Send(context.Background(), input)
 		return replyMsg{text: out, err: err}
+	}
+}
+
+// renderToolEvents surfaces what the agent did this turn (e.g. the label of a
+// created task), so the user always sees the effect even if the model is terse.
+func (m *chatModel) renderToolEvents() {
+	for _, ev := range m.deps.Agent.LastTools() {
+		switch ev.Name {
+		case "create_task":
+			var v struct {
+				ID    int64  `json:"id"`
+				Label string `json:"label"`
+			}
+			if json.Unmarshal([]byte(ev.Result), &v) == nil && v.Label != "" {
+				m.add("tool", fmt.Sprintf("＋ tarea creada: %s (#%d)", v.Label, v.ID))
+			} else {
+				m.add("tool", "＋ tarea creada")
+			}
+		case "set_status", "set_state", "set_details":
+			var v struct {
+				ID     int64  `json:"id"`
+				Label  string `json:"label"`
+				Status string `json:"status"`
+			}
+			if json.Unmarshal([]byte(ev.Result), &v) == nil && v.Label != "" {
+				m.add("tool", fmt.Sprintf("✎ %s (#%d) · %s", v.Label, v.ID, v.Status))
+			} else {
+				m.add("tool", "✎ "+ev.Name)
+			}
+		case "remember_note":
+			m.add("tool", "🧠 nota guardada en memoria")
+		case "recall_memory":
+			m.add("tool", "🔎 memoria consultada")
+		default:
+			m.add("tool", "⚙ "+ev.Name)
+		}
 	}
 }
 
@@ -487,6 +530,7 @@ func (m *chatModel) showTask(ctx context.Context, idStr string) {
 		t.Status, orDash(t.State), orDash(t.WorkItemID)))
 	b.WriteString(head.Render("Descripción") + "\n")
 	b.WriteString(wrap.Render(orDash(t.Description)) + "\n\n")
+	writeDetails(&b, head, wrap, t.Details)
 	b.WriteString(head.Render("Fechas") + "\n")
 	b.WriteString(fmt.Sprintf("- creada: %s\n- actualizada: %s\n- última interacción: %s",
 		t.CreatedAt.Local().Format("2006-01-02 15:04"),
@@ -500,6 +544,54 @@ func orDash(s string) string {
 		return "—"
 	}
 	return s
+}
+
+// writeDetails appends the filled activity-template sections (skips empties).
+func writeDetails(b *strings.Builder, head, wrap lipgloss.Style, d domain.TaskDetails) {
+	line := func(label, val string) {
+		if strings.TrimSpace(val) == "" {
+			return
+		}
+		b.WriteString(head.Render(label) + "\n")
+		b.WriteString(wrap.Render(val) + "\n\n")
+	}
+	list := func(label string, items []string) {
+		if len(items) == 0 {
+			return
+		}
+		b.WriteString(head.Render(label) + "\n")
+		for _, it := range items {
+			b.WriteString(wrap.Render("- "+it) + "\n")
+		}
+		b.WriteString("\n")
+	}
+	line("Objetivo", d.Objective)
+	line("Justificación", d.Justification)
+	if d.AsA != "" || d.IWant != "" || d.SoThat != "" {
+		b.WriteString(head.Render("Descripción funcional") + "\n")
+		b.WriteString(wrap.Render(fmt.Sprintf("Como %s\nQuiero %s\nPara %s",
+			orDash(d.AsA), orDash(d.IWant), orDash(d.SoThat))) + "\n\n")
+	}
+	list("Pre-condiciones", d.Preconditions)
+	list("Criterios de aceptación", d.AcceptanceCriteria)
+	line("Consideraciones técnicas", d.TechNotes)
+	line("Funcionalidad relacionada", d.RelatedFeature)
+	line("Ambiente", d.Environment)
+	list("Pasos a reproducir", d.StepsToReproduce)
+	line("Resultado actual", d.ActualResult)
+	line("Resultado esperado", d.ExpectedResult)
+	if len(d.Checklist) > 0 {
+		b.WriteString(head.Render("Checklist") + "\n")
+		for _, it := range d.Checklist {
+			mark := "☐"
+			if it.Done {
+				mark = "☑"
+			}
+			b.WriteString(wrap.Render(mark+" "+it.Text) + "\n")
+		}
+		b.WriteString("\n")
+	}
+	list("Anexos", d.Links)
 }
 
 func (m *chatModel) switchModel(name string) {
@@ -746,6 +838,8 @@ func (m *chatModel) setContent() {
 			blocks = append(blocks, botLabel.Render("planner")+"\n"+body.Render(e.text))
 		case "cmd":
 			blocks = append(blocks, cmdStyle.Render(e.text))
+		case "tool":
+			blocks = append(blocks, toolStyle.Render(e.text))
 		case "err":
 			blocks = append(blocks, body.Inherit(errStyle).Render("error: "+e.text))
 		case "raw":
@@ -785,7 +879,8 @@ func (m *chatModel) View() string {
 		b.WriteString(m.renderSuggestions())
 		b.WriteString("\n")
 	}
-	b.WriteString(m.ta.View())
+	// Wrap the input in a full-width background so the panel is uniform.
+	b.WriteString(lipgloss.NewStyle().Width(m.width).Background(inputBG).Render(m.ta.View()))
 	b.WriteString("\n")
 	b.WriteString(m.footer())
 	b.WriteString("\n")

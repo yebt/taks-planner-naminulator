@@ -62,5 +62,34 @@ type Task struct {
 	WorkItemID  string // Plane work item id; empty until synced
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
-	TouchedAt   time.Time // last interaction — drives the daily
+	TouchedAt   time.Time   // last interaction — drives the daily
+	Details     TaskDetails // extended activity-template fields
+}
+
+// ChecklistItem is one deliverable in a task's checklist.
+type ChecklistItem struct {
+	Text string `json:"text"`
+	Done bool   `json:"done"`
+}
+
+// TaskDetails holds the extended activity-template fields
+// (see docs/template-tasks.md). Everything is optional and serialized as JSON.
+type TaskDetails struct {
+	Objective          string   `json:"objective,omitempty"`
+	Justification      string   `json:"justification,omitempty"`
+	AsA                string   `json:"as_a,omitempty"`    // Como
+	IWant              string   `json:"i_want,omitempty"`  // Quiero
+	SoThat             string   `json:"so_that,omitempty"` // Para
+	Preconditions      []string `json:"preconditions,omitempty"`
+	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty"`
+	// FIX / incident-specific
+	RelatedFeature   string   `json:"related_feature,omitempty"`
+	Environment      string   `json:"environment,omitempty"`
+	StepsToReproduce []string `json:"steps_to_reproduce,omitempty"`
+	ActualResult     string   `json:"actual_result,omitempty"`
+	ExpectedResult   string   `json:"expected_result,omitempty"`
+	// Common
+	TechNotes string          `json:"tech_notes,omitempty"`
+	Checklist []ChecklistItem `json:"checklist,omitempty"`
+	Links     []string        `json:"links,omitempty"`
 }

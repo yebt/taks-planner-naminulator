@@ -17,14 +17,25 @@ type ToolDispatcher interface {
 	Dispatch(ctx context.Context, name, args string) (string, error)
 }
 
+// ToolEvent records one tool the agent ran during a turn (for UI surfacing).
+type ToolEvent struct {
+	Name   string
+	Args   string
+	Result string
+}
+
 // Agent holds a conversation plus the active provider and tool set.
 type Agent struct {
-	provider llm.Provider
-	tools    ToolDispatcher
-	messages []llm.Message
-	maxSteps int
-	window   *contextmgr.Manager
+	provider  llm.Provider
+	tools     ToolDispatcher
+	messages  []llm.Message
+	maxSteps  int
+	window    *contextmgr.Manager
+	lastTools []ToolEvent
 }
+
+// LastTools returns the tools executed during the most recent Send.
+func (a *Agent) LastTools() []ToolEvent { return a.lastTools }
 
 // New builds an agent with an optional system prompt.
 func New(p llm.Provider, tools ToolDispatcher, systemPrompt string) *Agent {
@@ -67,6 +78,7 @@ func (a *Agent) Provider() string { return a.provider.Name() }
 // the model's final text.
 func (a *Agent) Send(ctx context.Context, input string) (string, error) {
 	a.messages = append(a.messages, llm.Message{Role: llm.RoleUser, Content: input})
+	a.lastTools = nil
 	defs := a.tools.Definitions()
 
 	for step := 0; step < a.maxSteps; step++ {
@@ -92,6 +104,7 @@ func (a *Agent) Send(ctx context.Context, input string) (string, error) {
 			if err != nil {
 				result = fmt.Sprintf(`{"error":%q}`, err.Error())
 			}
+			a.lastTools = append(a.lastTools, ToolEvent{Name: tc.Name, Args: tc.Arguments, Result: result})
 			a.messages = append(a.messages, llm.Message{
 				Role:       llm.RoleTool,
 				ToolCallID: tc.ID,

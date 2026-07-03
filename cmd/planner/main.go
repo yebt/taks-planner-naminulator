@@ -5,7 +5,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/webcloster-dev/planner/internal/agent"
@@ -24,8 +23,9 @@ using the provided tools.
 
 Rules:
 - Create tasks with a type (FEAT, FIX, HOTFIX, TEST, EPIC) and a short title.
+- After creating or updating a task, state its label and id so the user knows what changed.
 - When the user makes progress, postpones, blocks, or finishes something, update the matching
-  task's status with set_status.
+  task's status with set_status. Use set_details to enrich a task with template fields.
 - Prefer calling tools over describing what you would do. Keep replies short and concrete.`
 
 func main() {
@@ -57,11 +57,11 @@ func usage() {
 usage:
   planner          start the interactive chat harness (default)
   planner tui      alias for the chat harness
-  planner config   write default config if missing and print its path
+  planner config   open the configuration TUI (providers, keys, plane, context)
   planner help     show this help
 
-in the harness: type / for the command menu — /todos /new /status /model /key /clear /quit
-API keys go in the config file (shown by 'planner config') or set them live with /key.
+in the harness: type / for the command menu — /todos /task /new /status /model /key /save /recall /clear
+API keys: edit them in 'planner config', or set them live in the harness with /key.
 `)
 }
 
@@ -92,23 +92,7 @@ func runConfig() error {
 	if err != nil {
 		return err
 	}
-	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
-		if err := config.Save(path, cfg); err != nil {
-			return err
-		}
-		fmt.Println("wrote default config:", path)
-	} else {
-		fmt.Println("config:", path)
-	}
-	fmt.Println("active provider:", cfg.ActiveProvider)
-	names := make([]string, 0, len(cfg.Providers))
-	for n := range cfg.Providers {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	fmt.Println("providers:", strings.Join(names, ", "))
-	fmt.Println("\nset API keys by editing that file, or run the harness and use: /key <provider> <apikey>")
-	return nil
+	return tui.RunConfig(&cfg, path)
 }
 
 func runChat() error {

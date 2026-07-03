@@ -100,6 +100,41 @@ func TestKeySavesToConfig(t *testing.T) {
 	}
 }
 
+// toolProvider emits a create_task tool call on the first turn, then a reply.
+type toolProvider struct{ calls int }
+
+func (p *toolProvider) Name() string { return "tp" }
+func (p *toolProvider) Chat(_ context.Context, _ []llm.Message, _ []llm.Tool) (llm.Response, error) {
+	p.calls++
+	if p.calls == 1 {
+		return llm.Response{ToolCalls: []llm.ToolCall{
+			{ID: "1", Name: "create_task", Arguments: `{"type":"FEAT","title":"Login"}`},
+		}}, nil
+	}
+	return llm.Response{Content: "done"}, nil
+}
+
+func TestToolEventShowsLabel(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.deps.Agent.SetProvider(&toolProvider{})
+	m.ta.SetValue("make a task")
+	_, cmd := m.submit()
+	if cmd == nil {
+		t.Fatal("expected a command from submit")
+	}
+	m.Update(cmd()) // run the agent turn, then feed the reply back
+
+	found := false
+	for _, e := range m.entries {
+		if e.role == "tool" && strings.Contains(e.text, "feat-login") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a tool event showing the created label; entries=%+v", m.entries)
+	}
+}
+
 func TestConversationSaveAndLoad(t *testing.T) {
 	m, _ := newTestModel(t)
 	m.deps.Agent.SetHistory([]llm.Message{

@@ -66,6 +66,21 @@ func (r *Registry) Definitions() []llm.Tool {
 				"state": strProp("Plane state name, e.g. 'In Progress'"),
 			}, "id", "state"),
 		},
+		{
+			Name:        "set_details",
+			Description: "Enrich a task with activity-template fields. Only the fields you pass are updated.",
+			Parameters: obj(props{
+				"id":                  intProp("Task id"),
+				"objective":           strProp("Objetivo — central purpose in 1-2 sentences"),
+				"justification":       strProp("Justificación — why it matters / value"),
+				"as_a":                strProp("Como — the role/user"),
+				"i_want":              strProp("Quiero — the desired capability"),
+				"so_that":             strProp("Para — the outcome/benefit"),
+				"acceptance_criteria": arrProp("Criterios de aceptación (Dado/Cuando/Entonces)"),
+				"preconditions":       arrProp("Pre-condiciones"),
+				"tech_notes":          strProp("Consideraciones técnicas"),
+			}, "id"),
+		},
 	}
 	if r.memEnabled() {
 		defs = append(defs,
@@ -101,6 +116,8 @@ func (r *Registry) Dispatch(ctx context.Context, name, args string) (string, err
 		return r.setStatus(ctx, args)
 	case "set_state":
 		return r.setState(ctx, args)
+	case "set_details":
+		return r.setDetails(ctx, args)
 	case "recall_memory":
 		return r.recallMemory(ctx, args)
 	case "remember_note":
@@ -237,6 +254,56 @@ func (r *Registry) setState(ctx context.Context, args string) (string, error) {
 	return marshal(view(t))
 }
 
+func (r *Registry) setDetails(ctx context.Context, args string) (string, error) {
+	var in struct {
+		ID                 int64    `json:"id"`
+		Objective          string   `json:"objective"`
+		Justification      string   `json:"justification"`
+		AsA                string   `json:"as_a"`
+		IWant              string   `json:"i_want"`
+		SoThat             string   `json:"so_that"`
+		AcceptanceCriteria []string `json:"acceptance_criteria"`
+		Preconditions      []string `json:"preconditions"`
+		TechNotes          string   `json:"tech_notes"`
+	}
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("set_details: bad args: %w", err)
+	}
+	t, err := r.store.Get(ctx, in.ID)
+	if err != nil {
+		return "", err
+	}
+	d := &t.Details
+	if in.Objective != "" {
+		d.Objective = in.Objective
+	}
+	if in.Justification != "" {
+		d.Justification = in.Justification
+	}
+	if in.AsA != "" {
+		d.AsA = in.AsA
+	}
+	if in.IWant != "" {
+		d.IWant = in.IWant
+	}
+	if in.SoThat != "" {
+		d.SoThat = in.SoThat
+	}
+	if len(in.AcceptanceCriteria) > 0 {
+		d.AcceptanceCriteria = in.AcceptanceCriteria
+	}
+	if len(in.Preconditions) > 0 {
+		d.Preconditions = in.Preconditions
+	}
+	if in.TechNotes != "" {
+		d.TechNotes = in.TechNotes
+	}
+	if err := r.store.Update(ctx, t); err != nil {
+		return "", err
+	}
+	return marshal(view(t))
+}
+
 // --- helpers ---
 
 type taskView struct {
@@ -321,4 +388,8 @@ func intProp(desc string) map[string]any {
 }
 func enumProp(desc string, values ...string) map[string]any {
 	return map[string]any{"type": "string", "description": desc, "enum": values}
+}
+
+func arrProp(desc string) map[string]any {
+	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
 }
