@@ -116,6 +116,7 @@ type chatModel struct {
 	suggestions []suggestion
 	selected    int
 	thinking    bool
+	quitArmed   bool     // first ctrl+c clears; second quits
 	history     []string // submitted inputs, for ↑/↓ recall
 	histPos     int      // -1 = not navigating
 	convID      int64    // 0 = unsaved
@@ -166,8 +167,16 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *chatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
-		return m, tea.Quit
+		if m.quitArmed {
+			return m, tea.Quit // second consecutive ctrl+c → quit
+		}
+		m.quitArmed = true // first ctrl+c → clear the prompt, arm quit
+		m.ta.Reset()
+		m.suggestions = nil
+		m.layout()
+		return m, nil
 	}
+	m.quitArmed = false // any other key disarms
 
 	// Suggestion menu open: navigate / complete / submit-if-complete.
 	if len(m.suggestions) > 0 {
@@ -258,34 +267,34 @@ func sendCmd(a *agent.Agent, input string) tea.Cmd {
 // created task), so the user always sees the effect even if the model is terse.
 func (m *chatModel) renderToolEvents() {
 	for _, ev := range m.deps.Agent.LastTools() {
+		var v struct {
+			ID     int64  `json:"id"`
+			Label  string `json:"label"`
+			Status string `json:"status"`
+		}
+		_ = json.Unmarshal([]byte(ev.Result), &v)
+		tag := v.Label
+		if tag == "" {
+			tag = ev.Name
+		} else if v.ID != 0 {
+			tag = fmt.Sprintf("%s (#%d)", v.Label, v.ID)
+		}
 		switch ev.Name {
 		case "create_task":
-			var v struct {
-				ID    int64  `json:"id"`
-				Label string `json:"label"`
+			m.add("tool", "+ "+tag)
+		case "set_status":
+			if v.Status != "" {
+				tag += " → " + v.Status
 			}
-			if json.Unmarshal([]byte(ev.Result), &v) == nil && v.Label != "" {
-				m.add("tool", fmt.Sprintf("＋ tarea creada: %s (#%d)", v.Label, v.ID))
-			} else {
-				m.add("tool", "＋ tarea creada")
-			}
-		case "set_status", "set_state", "set_details":
-			var v struct {
-				ID     int64  `json:"id"`
-				Label  string `json:"label"`
-				Status string `json:"status"`
-			}
-			if json.Unmarshal([]byte(ev.Result), &v) == nil && v.Label != "" {
-				m.add("tool", fmt.Sprintf("✎ %s (#%d) · %s", v.Label, v.ID, v.Status))
-			} else {
-				m.add("tool", "✎ "+ev.Name)
-			}
+			m.add("tool", "~ "+tag)
+		case "set_state", "set_details":
+			m.add("tool", "~ "+tag)
 		case "remember_note":
-			m.add("tool", "🧠 nota guardada en memoria")
+			m.add("tool", "+ memory")
 		case "recall_memory":
-			m.add("tool", "🔎 memoria consultada")
+			m.add("tool", "? memory")
 		default:
-			m.add("tool", "⚙ "+ev.Name)
+			m.add("tool", "· "+ev.Name)
 		}
 	}
 }
@@ -907,6 +916,9 @@ func (m *chatModel) View() string {
 }
 
 func (m *chatModel) footer() string {
+	if m.quitArmed {
+		return thinkStyle.Render("press ctrl+c again to quit")
+	}
 	if m.thinking {
 		return thinkStyle.Render("⏳ thinking…")
 	}
