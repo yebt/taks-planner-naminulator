@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -10,6 +11,7 @@ import (
 	"github.com/webcloster-dev/planner/internal/agent"
 	"github.com/webcloster-dev/planner/internal/config"
 	"github.com/webcloster-dev/planner/internal/llm"
+	"github.com/webcloster-dev/planner/internal/memory"
 	"github.com/webcloster-dev/planner/internal/store"
 	"github.com/webcloster-dev/planner/internal/tools"
 )
@@ -36,7 +38,9 @@ func newTestModel(t *testing.T) (*chatModel, store.TaskStore) {
 		ConfigPath: filepath.Join(t.TempDir(), "config.json"),
 		Agent:      ag,
 		Store:      st,
+		Convos:     st,
 		Tools:      reg,
+		Memory:     memory.Noop{},
 		Build:      func(config.Config, string) (llm.Provider, error) { return stubProvider{}, nil },
 	}
 	m := newChatModel(deps)
@@ -92,6 +96,47 @@ func TestKeySavesToConfig(t *testing.T) {
 	}
 	if reloaded.Providers["claude"].APIKey != "sk-test-123" {
 		t.Fatalf("key not saved: %+v", reloaded.Providers["claude"])
+	}
+}
+
+func TestConversationSaveAndLoad(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.deps.Agent.SetHistory([]llm.Message{
+		{Role: llm.RoleUser, Content: "hello"},
+		{Role: llm.RoleAssistant, Content: "hi there"},
+	})
+	m.add("you", "hello")
+	m.add("planner", "hi there")
+
+	m.ta.SetValue("/save my chat")
+	m.submit()
+	if m.convID == 0 {
+		t.Fatal("convID not set after /save")
+	}
+	savedID := m.convID
+
+	m.ta.SetValue("/newchat")
+	m.submit()
+	if m.convID != 0 || m.deps.Agent.HistoryLen() != 0 {
+		t.Fatalf("newchat should reset conv+history, got id=%d len=%d", m.convID, m.deps.Agent.HistoryLen())
+	}
+
+	m.ta.SetValue("/load " + strconv.FormatInt(savedID, 10))
+	m.submit()
+	if m.convID != savedID {
+		t.Fatalf("load did not set convID: %d", m.convID)
+	}
+	if m.deps.Agent.HistoryLen() != 2 {
+		t.Fatalf("history not restored: %d", m.deps.Agent.HistoryLen())
+	}
+	found := false
+	for _, e := range m.entries {
+		if e.role == "you" && e.text == "hello" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("entries not rebuilt from loaded conversation")
 	}
 }
 

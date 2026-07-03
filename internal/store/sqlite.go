@@ -35,8 +35,8 @@ func OpenSQLite(path string) (*SQLite, error) {
 }
 
 func (s *SQLite) migrate() error {
-	_, err := s.db.Exec(`
-CREATE TABLE IF NOT EXISTS tasks (
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS tasks (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   label        TEXT    NOT NULL,
   type         TEXT    NOT NULL,
@@ -48,8 +48,29 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL,
   touched_at   INTEGER NOT NULL
-);`)
-	return err
+);`,
+		`CREATE TABLE IF NOT EXISTS conversations (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  title      TEXT    NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL
+);`,
+		`CREATE TABLE IF NOT EXISTS conv_messages (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL,
+  idx             INTEGER NOT NULL,
+  role            TEXT    NOT NULL,
+  content         TEXT    NOT NULL DEFAULT '',
+  tool_calls      TEXT    NOT NULL DEFAULT '',
+  tool_call_id    TEXT    NOT NULL DEFAULT '',
+  name            TEXT    NOT NULL DEFAULT ''
+);`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Close closes the underlying database.

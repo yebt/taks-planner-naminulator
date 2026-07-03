@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/webcloster-dev/planner/internal/contextmgr"
 	"github.com/webcloster-dev/planner/internal/llm"
 )
 
@@ -22,6 +23,7 @@ type Agent struct {
 	tools    ToolDispatcher
 	messages []llm.Message
 	maxSteps int
+	window   *contextmgr.Manager
 }
 
 // New builds an agent with an optional system prompt.
@@ -46,6 +48,18 @@ func (a *Agent) Reset() {
 	a.messages = nil
 }
 
+// SetWindow installs a context manager used to trim history before each call.
+func (a *Agent) SetWindow(w *contextmgr.Manager) { a.window = w }
+
+// History returns the full conversation (for persistence).
+func (a *Agent) History() []llm.Message { return a.messages }
+
+// HistoryLen reports how many messages are in the conversation.
+func (a *Agent) HistoryLen() int { return len(a.messages) }
+
+// SetHistory replaces the conversation (used when loading a saved chat).
+func (a *Agent) SetHistory(msgs []llm.Message) { a.messages = msgs }
+
 // Provider returns the active provider name.
 func (a *Agent) Provider() string { return a.provider.Name() }
 
@@ -56,7 +70,11 @@ func (a *Agent) Send(ctx context.Context, input string) (string, error) {
 	defs := a.tools.Definitions()
 
 	for step := 0; step < a.maxSteps; step++ {
-		resp, err := a.provider.Chat(ctx, a.messages, defs)
+		send := a.messages
+		if a.window != nil {
+			send = a.window.Fit(a.messages)
+		}
+		resp, err := a.provider.Chat(ctx, send, defs)
 		if err != nil {
 			return "", err
 		}

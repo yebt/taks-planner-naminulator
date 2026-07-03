@@ -5,6 +5,7 @@ import (
 	"context"
 
 	"github.com/webcloster-dev/planner/internal/domain"
+	"github.com/webcloster-dev/planner/internal/llm"
 )
 
 // Filter narrows a List query.
@@ -20,4 +21,11 @@ type TaskStore interface {
 	List(ctx context.Context, f Filter) ([]domain.Task, error)
 	Update(ctx context.Context, t domain.Task) error
 	Close() error
+}
+
+// ConversationStore persists and restores chat sessions.
+type ConversationStore interface {
+	SaveConversation(ctx context.Context, id int64, title string, msgs []llm.Message) (int64, error)
+	ListConversations(ctx context.Context) ([]Conversation, error)
+	LoadConversation(ctx context.Context, id int64) ([]llm.Message, error)
 }

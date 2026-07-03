@@ -10,7 +10,9 @@ import (
 
 	"github.com/webcloster-dev/planner/internal/agent"
 	"github.com/webcloster-dev/planner/internal/config"
+	"github.com/webcloster-dev/planner/internal/contextmgr"
 	"github.com/webcloster-dev/planner/internal/llm"
+	"github.com/webcloster-dev/planner/internal/memory"
 	"github.com/webcloster-dev/planner/internal/store"
 	"github.com/webcloster-dev/planner/internal/tools"
 	"github.com/webcloster-dev/planner/internal/tui"
@@ -70,7 +72,7 @@ func configPath() string {
 	return config.DefaultPath()
 }
 
-func openStore(cfg config.Config) (store.TaskStore, error) {
+func openStore(cfg config.Config) (*store.SQLite, error) {
 	if err := os.MkdirAll(dir(cfg.DBPath), 0o755); err != nil {
 		return nil, err
 	}
@@ -125,15 +127,21 @@ func runChat() error {
 	}
 	defer st.Close()
 
+	mem := memory.Detect(cfg.Memory.Project)
 	reg := tools.New(st)
+	reg.SetMemory(mem)
+
 	ag := agent.New(provider, reg, systemPrompt)
+	ag.SetWindow(contextmgr.New(cfg.ContextBudget))
 
 	return tui.RunChat(tui.ChatDeps{
 		Cfg:        &cfg,
 		ConfigPath: path,
 		Agent:      ag,
 		Store:      st,
+		Convos:     st,
 		Tools:      reg,
+		Memory:     mem,
 		Build:      buildProvider,
 	})
 }

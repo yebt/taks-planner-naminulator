@@ -21,13 +21,23 @@ type PlaneConfig struct {
 	StateDefaults map[string]string `json:"state_defaults,omitempty"` // group -> default state name
 }
 
+// MemoryConfig configures the long-term memory backend (Engram).
+type MemoryConfig struct {
+	Project string `json:"project,omitempty"` // engram project; empty = autodetect from cwd
+}
+
 // Config is the top-level app config.
 type Config struct {
 	ActiveProvider string                        `json:"active_provider"`
 	Providers      map[string]llm.ProviderConfig `json:"providers"`
 	DBPath         string                        `json:"db_path"`
+	ContextBudget  int                           `json:"context_budget"` // chars kept in the LLM window
 	Plane          PlaneConfig                   `json:"plane"`
+	Memory         MemoryConfig                  `json:"memory"`
 }
+
+// DefaultContextBudget is the default LLM context window budget in characters.
+const DefaultContextBudget = 24000
 
 // Default returns a ready-to-run config: Ollama active (free, local) plus
 // stub entries for the paid providers so /model can switch once keys are set.
@@ -35,6 +45,7 @@ func Default() Config {
 	return Config{
 		ActiveProvider: "ollama",
 		DBPath:         DefaultDBPath(),
+		ContextBudget:  DefaultContextBudget,
 		Providers: map[string]llm.ProviderConfig{
 			"ollama":   {Kind: "custom", Label: "ollama", BaseURL: "http://localhost:11434/v1", APIKey: "ollama", Model: "llama3.1"},
 			"openai":   {Kind: "openai", Label: "openai", Model: "gpt-4o-mini"},
@@ -81,6 +92,9 @@ func Load(path string) (Config, error) {
 	}
 	if c.ActiveProvider == "" {
 		c.ActiveProvider = Default().ActiveProvider
+	}
+	if c.ContextBudget <= 0 {
+		c.ContextBudget = DefaultContextBudget
 	}
 	return c, nil
 }

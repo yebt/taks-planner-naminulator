@@ -11,20 +11,27 @@ import (
 
 	"github.com/webcloster-dev/planner/internal/domain"
 	"github.com/webcloster-dev/planner/internal/llm"
+	"github.com/webcloster-dev/planner/internal/memory"
 	"github.com/webcloster-dev/planner/internal/store"
 )
 
-// Registry wires the tool set to a task store.
+// Registry wires the tool set to a task store and (optionally) long-term memory.
 type Registry struct {
 	store store.TaskStore
+	mem   memory.Memory
 }
 
 // New builds a tool registry over a store.
 func New(s store.TaskStore) *Registry { return &Registry{store: s} }
 
+// SetMemory enables the recall/remember tools when a memory backend is present.
+func (r *Registry) SetMemory(m memory.Memory) { r.mem = m }
+
+func (r *Registry) memEnabled() bool { return r.mem != nil && r.mem.Available() }
+
 // Definitions returns the provider-agnostic tool schemas.
 func (r *Registry) Definitions() []llm.Tool {
-	return []llm.Tool{
+	defs := []llm.Tool{
 		{
 			Name:        "create_task",
 			Description: "Create a new task in the local planner. Use when the user starts or mentions new work.",
@@ -60,6 +67,27 @@ func (r *Registry) Definitions() []llm.Tool {
 			}, "id", "state"),
 		},
 	}
+	if r.memEnabled() {
+		defs = append(defs,
+			llm.Tool{
+				Name:        "recall_memory",
+				Description: "Search long-term memory for relevant past notes, decisions, or context.",
+				Parameters: obj(props{
+					"query": strProp("What to search for"),
+					"limit": intProp("Max results (default 5)"),
+				}, "query"),
+			},
+			llm.Tool{
+				Name:        "remember_note",
+				Description: "Save an important fact or decision to long-term memory for later recall.",
+				Parameters: obj(props{
+					"title":   strProp("Short title"),
+					"content": strProp("The note to remember"),
+				}, "title", "content"),
+			},
+		)
+	}
+	return defs
 }
 
 // Dispatch runs a tool by name with raw JSON arguments and returns a JSON result.
@@ -73,9 +101,44 @@ func (r *Registry) Dispatch(ctx context.Context, name, args string) (string, err
 		return r.setStatus(ctx, args)
 	case "set_state":
 		return r.setState(ctx, args)
+	case "recall_memory":
+		return r.recallMemory(ctx, args)
+	case "remember_note":
+		return r.rememberNote(ctx, args)
 	default:
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
+}
+
+func (r *Registry) recallMemory(ctx context.Context, args string) (string, error) {
+	if !r.memEnabled() {
+		return "", fmt.Errorf("memory backend not available")
+	}
+	var in struct {
+		Query string `json:"query"`
+		Limit int    `json:"limit"`
+	}
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("recall_memory: bad args: %w", err)
+	}
+	return r.mem.Recall(ctx, in.Query, in.Limit)
+}
+
+func (r *Registry) rememberNote(ctx context.Context, args string) (string, error) {
+	if !r.memEnabled() {
+		return "", fmt.Errorf("memory backend not available")
+	}
+	var in struct {
+		Title   string `json:"title"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("remember_note: bad args: %w", err)
+	}
+	if err := r.mem.Save(ctx, in.Title, in.Content); err != nil {
+		return "", err
+	}
+	return `{"saved":true}`, nil
 }
 
 func (r *Registry) createTask(ctx context.Context, args string) (string, error) {
