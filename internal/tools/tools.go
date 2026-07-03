@@ -61,8 +61,8 @@ func (r *Registry) Definitions() []llm.Tool {
 				"description": strProp("Optional longer description"),
 				"label":       strProp("Optional short label; auto-generated from type+title if omitted"),
 				"status":      enumProp("Initial status", statuses()...),
-				"start_date":  strProp("Plane start date, YYYY-MM-DD"),
-				"due_date":    strProp("Plane due date (target date), YYYY-MM-DD"),
+				"start_date":  strProp("Plane start date, YYYY-MM-DD (defaults to today if omitted)"),
+				"due_date":    strProp("Plane due date, YYYY-MM-DD (defaults to start_date + 1 day)"),
 			}, "type", "title"),
 		},
 		{
@@ -221,6 +221,15 @@ func (r *Registry) createTask(ctx context.Context, args string) (string, error) 
 	}
 	if err := validDate("due_date", in.DueDate); err != nil {
 		return "", err
+	}
+	// Default the work-item dates: start today, due one day later. The model can
+	// still pass explicit dates (e.g. to space a batch of tasks across a month).
+	if in.StartDate == "" {
+		in.StartDate = time.Now().Format("2006-01-02")
+	}
+	if in.DueDate == "" {
+		start, _ := time.Parse("2006-01-02", in.StartDate)
+		in.DueDate = start.AddDate(0, 0, 1).Format("2006-01-02")
 	}
 	label := in.Label
 	if label == "" {

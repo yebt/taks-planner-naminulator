@@ -122,6 +122,7 @@ func runChat() error {
 		WorkspaceSlug: cfg.Plane.WorkspaceSlug,
 		ProjectID:     cfg.Plane.ProjectID,
 	}), st, cfg.Plane.StateDefaults)
+	syncer.SetEstimate(cfg.Plane.DefaultEstimate)
 	reg.SetSyncer(syncer)
 
 	ag := agent.New(provider, reg, systemPrompt)

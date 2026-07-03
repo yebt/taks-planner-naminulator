@@ -69,6 +69,9 @@ func buildFields(cfg *config.Config) []cfgField {
 		{"plane project id", false,
 			func() string { return cfg.Plane.ProjectID },
 			func(v string) { cfg.Plane.ProjectID = strings.TrimSpace(v) }},
+		{"plane default estimate", false,
+			func() string { return cfg.Plane.DefaultEstimate },
+			func(v string) { cfg.Plane.DefaultEstimate = strings.TrimSpace(v) }},
 	}
 
 	names := make([]string, 0, len(cfg.Providers))

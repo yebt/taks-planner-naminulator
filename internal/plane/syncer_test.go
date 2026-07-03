@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/webcloster-dev/planner/internal/domain"
@@ -56,6 +57,46 @@ func TestSyncerPushCreatesAndPersists(t *testing.T) {
 	got, _ := st.Get(context.Background(), created.ID)
 	if got.WorkItemID != "wi-1" || got.WorkItemSeq != 7 {
 		t.Fatalf("work item not persisted: id=%q seq=%d", got.WorkItemID, got.WorkItemSeq)
+	}
+}
+
+func TestSyncerPushSetsLabelAndPriority(t *testing.T) {
+	var createBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/labels/"):
+			w.Write([]byte(`{"results":[{"id":"lbl-fix","name":"FIX"},{"id":"lbl-feat","name":"FEAT"}]}`))
+		case r.Method == http.MethodGet:
+			w.Write([]byte(`{"results":[]}`))
+		case r.Method == http.MethodPost:
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &createBody)
+			w.Write([]byte(`{"id":"wi-9","sequence_id":9}`))
+		default:
+			w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	created, _ := st.Create(context.Background(), domain.Task{
+		Label: "fix-x", Type: domain.TypeFix, Title: "X", Status: domain.StatusTodo,
+	})
+
+	sy := NewSyncer(testClient(srv.URL), st, nil)
+	if err := sy.Push(context.Background(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if createBody["priority"] != "high" { // FIX bumps priority
+		t.Fatalf("priority not set from type: %v", createBody["priority"])
+	}
+	labels, _ := createBody["labels"].([]any)
+	if len(labels) != 1 || labels[0] != "lbl-fix" {
+		t.Fatalf("label not matched to type: %v", createBody["labels"])
 	}
 }
 

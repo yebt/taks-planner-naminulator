@@ -15,11 +15,20 @@ import (
 // asked from the user (can't be inferred via API); ProjectID is selected from
 // the API or entered manually.
 type PlaneConfig struct {
-	BaseURL       string            `json:"base_url,omitempty"` // e.g. https://planner.webcloster.cloud
-	APIToken      string            `json:"api_token,omitempty"`
-	WorkspaceSlug string            `json:"workspace_slug,omitempty"`
-	ProjectID     string            `json:"project_id,omitempty"`
-	StateDefaults map[string]string `json:"state_defaults,omitempty"` // group -> default state name
+	BaseURL         string            `json:"base_url,omitempty"` // e.g. https://planner.webcloster.cloud
+	APIToken        string            `json:"api_token,omitempty"`
+	WorkspaceSlug   string            `json:"workspace_slug,omitempty"`
+	ProjectID       string            `json:"project_id,omitempty"`
+	StateDefaults   map[string]string `json:"state_defaults,omitempty"`   // group -> default state name
+	DefaultEstimate string            `json:"default_estimate,omitempty"` // estimate_point sent on new work items; empty = don't set
+}
+
+// Favorite is a saved provider+model combo the user can re-select later (e.g.
+// swap from a spent Kimi/Moonshot to a specific Groq model that worked before).
+type Favorite struct {
+	Name     string `json:"name"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
 }
 
 // DefaultPlaneBaseURL is the self-hosted Plane host used unless overridden.
@@ -34,6 +43,7 @@ type MemoryConfig struct {
 type Config struct {
 	ActiveProvider string                        `json:"active_provider"`
 	Providers      map[string]llm.ProviderConfig `json:"providers"`
+	Favorites      []Favorite                    `json:"favorites,omitempty"` // saved provider+model combos
 	DBPath         string                        `json:"db_path"`
 	ContextBudget  int                           `json:"context_budget"` // chars kept in the LLM window
 	Plane          PlaneConfig                   `json:"plane"`
@@ -90,8 +100,17 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return Config{}, err
 	}
+	def := Default()
 	if len(c.Providers) == 0 {
-		c.Providers = Default().Providers
+		c.Providers = def.Providers
+	} else {
+		// Heal older config files: add providers introduced after they were
+		// written (e.g. groq) without touching the user's existing entries.
+		for name, pc := range def.Providers {
+			if _, ok := c.Providers[name]; !ok {
+				c.Providers[name] = pc
+			}
+		}
 	}
 	if c.DBPath == "" {
 		c.DBPath = DefaultDBPath()

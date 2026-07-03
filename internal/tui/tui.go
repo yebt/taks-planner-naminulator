@@ -381,6 +381,7 @@ var baseCommands = []suggestion{
 	{"/status", "/status <id> <status> — change a task status"},
 	{"/drop", "/drop <id> [sync] — delete a task (sync also removes it in Plane)"},
 	{"/model", "switch LLM provider"},
+	{"/fav", "/fav [save|del] <name> — save/switch a provider+model favorite"},
 	{"/key", "/key <provider> <apikey> — set & save an API key"},
 	{"/save", "save this conversation"},
 	{"/chats", "list saved conversations"},
@@ -395,7 +396,7 @@ var baseCommands = []suggestion{
 }
 
 var needsArg = map[string]bool{
-	"/new": true, "/status": true, "/model": true, "/key": true,
+	"/new": true, "/status": true, "/model": true, "/key": true, "/fav": true,
 	"/load": true, "/recall": true, "/remember": true, "/task": true, "/drop": true,
 }
 
@@ -482,6 +483,22 @@ func (m *chatModel) runCommand(val string) tea.Cmd {
 			break
 		}
 		m.switchModel(fields[1])
+
+	case "/fav":
+		switch {
+		case len(fields) == 1:
+			m.listFavorites()
+		case fields[1] == "save":
+			m.saveFavorite(strings.Join(fields[2:], " "))
+		case fields[1] == "del" || fields[1] == "drop":
+			if len(fields) < 3 {
+				m.add("err", "usage: /fav del <name>")
+				break
+			}
+			m.delFavorite(strings.Join(fields[2:], " "))
+		default:
+			m.applyFavorite(strings.Join(fields[1:], " "))
+		}
 
 	case "/key":
 		if len(fields) < 3 {
@@ -686,8 +703,12 @@ func (m *chatModel) showTask(ctx context.Context, idStr string) {
 	b.WriteString(title.Render(fmt.Sprintf("%s · %s · #%d", t.Type, t.Label, t.ID)) + "\n")
 	b.WriteString(title.Render(t.Title) + "\n\n")
 	b.WriteString(head.Render("Estado") + "\n")
-	b.WriteString(fmt.Sprintf("- status: %s\n- state: %s\n- work item: %s\n\n",
-		t.Status, orDash(t.State), orDash(t.WorkItemID)))
+	workItem := orDash(t.WorkItemID)
+	if t.WorkItemSeq > 0 {
+		workItem = fmt.Sprintf("#%d (%s)", t.WorkItemSeq, t.WorkItemID)
+	}
+	b.WriteString(fmt.Sprintf("- status: %s\n- priority: %s\n- state: %s\n- work item: %s\n- fechas: %s → %s\n\n",
+		t.Status, t.PlanePriority(), orDash(t.State), workItem, orDash(t.StartDate), orDash(t.DueDate)))
 	b.WriteString(head.Render("Descripción") + "\n")
 	b.WriteString(wrap.Render(orDash(t.Description)) + "\n\n")
 	writeDetails(&b, head, wrap, t.Details)
@@ -771,6 +792,98 @@ func (m *chatModel) switchModel(name string) {
 		return
 	}
 	m.add("sys", "provider → "+name)
+}
+
+// --- favorites (saved provider+model combos) ---
+
+func (m *chatModel) listFavorites() {
+	if len(m.deps.Cfg.Favorites) == 0 {
+		m.add("sys", "no favorites yet. use: /fav save <name> to store the current provider+model.")
+		return
+	}
+	var b strings.Builder
+	b.WriteString("favorites:\n")
+	for _, f := range m.deps.Cfg.Favorites {
+		b.WriteString(fmt.Sprintf("  %-16s %s · %s\n", f.Name, f.Provider, f.Model))
+	}
+	b.WriteString("\nuse: /fav <name> to switch")
+	m.add("sys", strings.TrimRight(b.String(), "\n"))
+}
+
+func (m *chatModel) saveFavorite(name string) {
+	prov := m.deps.Cfg.ActiveProvider
+	model := m.deps.Cfg.Providers[prov].Model
+	if strings.TrimSpace(name) == "" {
+		name = prov + ":" + model
+	}
+	fav := config.Favorite{Name: name, Provider: prov, Model: model}
+	replaced := false
+	for i, f := range m.deps.Cfg.Favorites {
+		if strings.EqualFold(f.Name, name) {
+			m.deps.Cfg.Favorites[i] = fav
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		m.deps.Cfg.Favorites = append(m.deps.Cfg.Favorites, fav)
+	}
+	if err := config.Save(m.deps.ConfigPath, *m.deps.Cfg); err != nil {
+		m.add("err", "save failed: "+err.Error())
+		return
+	}
+	m.add("sys", fmt.Sprintf("saved favorite %q → %s · %s", name, prov, model))
+}
+
+func (m *chatModel) delFavorite(name string) {
+	out := m.deps.Cfg.Favorites[:0]
+	found := false
+	for _, f := range m.deps.Cfg.Favorites {
+		if strings.EqualFold(f.Name, name) {
+			found = true
+			continue
+		}
+		out = append(out, f)
+	}
+	if !found {
+		m.add("err", "favorite not found: "+name)
+		return
+	}
+	m.deps.Cfg.Favorites = out
+	if err := config.Save(m.deps.ConfigPath, *m.deps.Cfg); err != nil {
+		m.add("err", "save failed: "+err.Error())
+		return
+	}
+	m.add("sys", "removed favorite: "+name)
+}
+
+func (m *chatModel) applyFavorite(name string) {
+	for _, f := range m.deps.Cfg.Favorites {
+		if !strings.EqualFold(f.Name, name) {
+			continue
+		}
+		pc, ok := m.deps.Cfg.Providers[f.Provider]
+		if !ok {
+			m.add("err", "favorite provider missing from config: "+f.Provider)
+			return
+		}
+		pc.Model = f.Model
+		m.deps.Cfg.Providers[f.Provider] = pc
+		p, err := m.deps.Build(*m.deps.Cfg, f.Provider)
+		if err != nil {
+			m.add("err", err.Error())
+			return
+		}
+		m.deps.Agent.SetProvider(p)
+		m.deps.Cfg.ActiveProvider = f.Provider
+		if err := config.Save(m.deps.ConfigPath, *m.deps.Cfg); err != nil {
+			m.add("err", "applied, but save failed: "+err.Error())
+			return
+		}
+		m.add("sys", fmt.Sprintf("favorite → %s (%s · %s)", f.Name, f.Provider, f.Model))
+		return
+	}
+	m.add("err", "favorite not found: "+name)
 }
 
 func (m *chatModel) setKey(name, apiKey string) {

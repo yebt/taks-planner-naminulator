@@ -15,14 +15,20 @@ type Syncer struct {
 	client        *Client
 	store         store.TaskStore
 	stateDefaults map[string]string // group -> default state name (reserved for state mapping)
+	estimate      string            // default estimate_point for new work items ("" = unset)
 	states        []State
+	labels        []Label
 	loaded        bool
+	labelsLoaded  bool
 }
 
 // NewSyncer builds a syncer over a Plane client and the local store.
 func NewSyncer(client *Client, st store.TaskStore, stateDefaults map[string]string) *Syncer {
 	return &Syncer{client: client, store: st, stateDefaults: stateDefaults}
 }
+
+// SetEstimate sets the default estimate_point applied to new work items.
+func (s *Syncer) SetEstimate(e string) { s.estimate = e }
 
 // Configured reports whether Plane is usable.
 func (s *Syncer) Configured() bool { return s.client.Configured() }
@@ -50,6 +56,23 @@ func (s *Syncer) stateIDByName(ctx context.Context, name string) string {
 	return ""
 }
 
+// labelIDForType returns the id of the Plane label whose name matches the task
+// type (e.g. type FEAT → the "FEAT" label), or "" when there is no such label.
+func (s *Syncer) labelIDForType(ctx context.Context, t domain.TaskType) string {
+	if !s.labelsLoaded {
+		if ls, err := s.client.ListLabels(ctx); err == nil {
+			s.labels = ls
+		}
+		s.labelsLoaded = true
+	}
+	for _, l := range s.labels {
+		if strings.EqualFold(l.Name, string(t)) {
+			return l.ID
+		}
+	}
+	return ""
+}
+
 func (s *Syncer) stateNameByID(ctx context.Context, id string) string {
 	if id == "" {
 		return ""
@@ -69,6 +92,11 @@ func (s *Syncer) issueInput(ctx context.Context, t *domain.Task) IssueInput {
 		HTML:       t.RenderHTML(),   // template-expanded rich-text body
 		StartDate:  t.StartDate,
 		TargetDate: t.DueDate,
+		Priority:   t.PlanePriority(), // medium, or bumped for FIX/HOTFIX
+		Estimate:   s.estimate,        // default estimate_point (opt-in via config)
+	}
+	if id := s.labelIDForType(ctx, t.Type); id != "" {
+		in.Labels = []string{id} // tag with the label matching the task type
 	}
 	if t.State != "" {
 		in.StateID = s.stateIDByName(ctx, t.State)

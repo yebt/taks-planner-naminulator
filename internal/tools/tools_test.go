@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/webcloster-dev/planner/internal/store"
 )
@@ -132,6 +133,27 @@ func TestCreateWithDates(t *testing.T) {
 
 	if _, err := r.Dispatch(ctx, "create_task", `{"type":"feat","title":"Y","due_date":"06-2026"}`); err == nil {
 		t.Fatal("expected error for invalid date format")
+	}
+}
+
+func TestCreateDefaultsDates(t *testing.T) {
+	ctx := context.Background()
+	r := newReg(t)
+	out, err := r.Dispatch(ctx, "create_task", `{"type":"feat","title":"X"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v taskView
+	_ = json.Unmarshal([]byte(out), &v)
+	if v.StartDate == "" || v.DueDate == "" {
+		t.Fatalf("dates should default: %+v", v)
+	}
+	start, err := time.Parse("2006-01-02", v.StartDate)
+	if err != nil {
+		t.Fatalf("bad start date: %q", v.StartDate)
+	}
+	if got := start.AddDate(0, 0, 1).Format("2006-01-02"); got != v.DueDate {
+		t.Fatalf("due should be start+1 day: start=%s due=%s", v.StartDate, v.DueDate)
 	}
 }
 

@@ -84,6 +84,19 @@ func (t Task) DisplayTitle() string {
 	return fmt.Sprintf("[%s] - %s", t.Type, t.Title)
 }
 
+// PlanePriority maps the activity type to a Plane priority. Defaults to medium;
+// incidents get bumped (HOTFIX urgent, FIX high).
+func (t Task) PlanePriority() string {
+	switch t.Type {
+	case TypeHotfix:
+		return "urgent"
+	case TypeFix:
+		return "high"
+	default:
+		return "medium"
+	}
+}
+
 // RenderHTML builds the Plane work-item body (description_html) from the
 // description and the activity-template fields, as rich-text HTML. Empty
 // sections are skipped. Section labels follow the Spanish activity template.

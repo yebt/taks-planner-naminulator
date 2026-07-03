@@ -41,11 +41,20 @@ func (c *Client) Configured() bool {
 // IssueInput is the subset of Plane issue fields we set.
 type IssueInput struct {
 	Name        string
-	Description string // plain text; wrapped as description_html (used when HTML is empty)
-	HTML        string // pre-rendered rich-text body; takes precedence over Description
-	StartDate   string // YYYY-MM-DD or ""
-	TargetDate  string // YYYY-MM-DD or "" (Plane's "Due date")
-	StateID     string // optional Plane state uuid
+	Description string   // plain text; wrapped as description_html (used when HTML is empty)
+	HTML        string   // pre-rendered rich-text body; takes precedence over Description
+	StartDate   string   // YYYY-MM-DD or ""
+	TargetDate  string   // YYYY-MM-DD or "" (Plane's "Due date")
+	StateID     string   // optional Plane state uuid
+	Priority    string   // urgent | high | medium | low | none; "" leaves it untouched
+	Labels      []string // label uuids to attach
+	Estimate    string   // estimate_point; "" leaves it untouched
+}
+
+// Label is a Plane issue label (tag).
+type Label struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // IssueRef identifies a work item after creation: its uuid and the project
@@ -84,6 +93,15 @@ func (in IssueInput) body() map[string]any {
 	if in.StateID != "" {
 		b["state"] = in.StateID
 	}
+	if in.Priority != "" {
+		b["priority"] = in.Priority
+	}
+	if len(in.Labels) > 0 {
+		b["labels"] = in.Labels
+	}
+	if in.Estimate != "" {
+		b["estimate_point"] = in.Estimate
+	}
 	return b
 }
 
@@ -118,6 +136,17 @@ func (c *Client) ListStates(ctx context.Context) ([]State, error) {
 		Results []State `json:"results"`
 	}
 	if err := c.do(ctx, http.MethodGet, c.base()+"/states/", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Results, nil
+}
+
+// ListLabels returns the project's issue labels (tags).
+func (c *Client) ListLabels(ctx context.Context) ([]Label, error) {
+	var out struct {
+		Results []Label `json:"results"`
+	}
+	if err := c.do(ctx, http.MethodGet, c.base()+"/labels/", nil, &out); err != nil {
 		return nil, err
 	}
 	return out.Results, nil
