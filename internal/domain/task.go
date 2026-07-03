@@ -60,6 +60,8 @@ type Task struct {
 	Status      Status
 	State       string // Plane state name (e.g. "In Progress"); empty until mapped
 	WorkItemID  string // Plane work item id; empty until synced
+	StartDate   string // YYYY-MM-DD (Plane start_date); required by Plane work items
+	DueDate     string // YYYY-MM-DD (Plane target_date)
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	TouchedAt   time.Time   // last interaction — drives the daily

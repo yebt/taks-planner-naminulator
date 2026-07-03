@@ -27,6 +27,13 @@ import (
 	"github.com/webcloster-dev/planner/internal/tools"
 )
 
+// Syncer pushes tasks to Plane and pulls states (implemented by internal/plane).
+type Syncer interface {
+	Configured() bool
+	Push(ctx context.Context, t *domain.Task) error
+	PullStates(ctx context.Context) (int, error)
+}
+
 // ChatDeps wires the harness to the rest of the app.
 type ChatDeps struct {
 	Cfg        *config.Config
@@ -36,6 +43,7 @@ type ChatDeps struct {
 	Convos     store.ConversationStore
 	Tools      *tools.Registry
 	Memory     memory.Memory
+	Syncer     Syncer
 	Build      func(cfg config.Config, name string) (llm.Provider, error)
 }
 
@@ -282,6 +290,8 @@ func (m *chatModel) renderToolEvents() {
 		switch ev.Name {
 		case "create_task":
 			m.add("tool", "+ "+tag)
+		case "drop_task":
+			m.add("tool", "- "+tag)
 		case "set_status":
 			if v.Status != "" {
 				tag += " → " + v.Status
@@ -346,6 +356,7 @@ var baseCommands = []suggestion{
 	{"/task", "/task <id> — show a task in full"},
 	{"/new", "/new <TYPE> <title> — create a task (no LLM)"},
 	{"/status", "/status <id> <status> — change a task status"},
+	{"/drop", "/drop <id> — delete a task"},
 	{"/model", "switch LLM provider"},
 	{"/key", "/key <provider> <apikey> — set & save an API key"},
 	{"/save", "save this conversation"},
@@ -354,13 +365,15 @@ var baseCommands = []suggestion{
 	{"/newchat", "start a fresh conversation"},
 	{"/recall", "/recall <query> — search long-term memory"},
 	{"/remember", "/remember <note> — save to long-term memory"},
+	{"/sync", "push local tasks to Plane"},
+	{"/pull", "pull states from Plane"},
 	{"/clear", "clear the conversation"},
 	{"/quit", "exit"},
 }
 
 var needsArg = map[string]bool{
 	"/new": true, "/status": true, "/model": true, "/key": true,
-	"/load": true, "/recall": true, "/remember": true, "/task": true,
+	"/load": true, "/recall": true, "/remember": true, "/task": true, "/drop": true,
 }
 
 func (m *chatModel) runCommand(val string) tea.Cmd {
@@ -418,6 +431,18 @@ func (m *chatModel) runCommand(val string) tea.Cmd {
 		args := fmt.Sprintf(`{"id":%s,"status":%q}`, fields[1], fields[2])
 		out, err := m.deps.Tools.Dispatch(ctx, "set_status", args)
 		m.report("updated: ", out, err)
+
+	case "/drop":
+		if len(fields) < 2 {
+			m.add("err", "usage: /drop <id>")
+			break
+		}
+		if _, err := strconv.ParseInt(fields[1], 10, 64); err != nil {
+			m.add("err", "id must be a number")
+			break
+		}
+		out, err := m.deps.Tools.Dispatch(ctx, "drop_task", fmt.Sprintf(`{"id":%s}`, fields[1]))
+		m.report("dropped: ", out, err)
 
 	case "/model":
 		if len(fields) < 2 {
@@ -480,6 +505,21 @@ func (m *chatModel) runCommand(val string) tea.Cmd {
 			m.add("sys", "remembered: "+trunc(note, 48))
 		}
 
+	case "/sync":
+		m.syncAll(ctx)
+
+	case "/pull":
+		if m.deps.Syncer == nil || !m.deps.Syncer.Configured() {
+			m.add("err", "Plane not configured (set base_url/token/slug/project in config)")
+			break
+		}
+		n, err := m.deps.Syncer.PullStates(ctx)
+		if err != nil {
+			m.add("err", err.Error())
+		} else {
+			m.add("sys", fmt.Sprintf("pulled states: %d task(s) updated", n))
+		}
+
 	default:
 		m.add("err", "unknown command: "+fields[0]+" (try /help)")
 	}
@@ -511,6 +551,30 @@ func (m *chatModel) showTodos(ctx context.Context) {
 	}
 	b.WriteString("\nuse: /task <id> for detail")
 	m.add("sys", strings.TrimRight(b.String(), "\n"))
+}
+
+// syncAll pushes every local task to Plane, reporting failures individually.
+func (m *chatModel) syncAll(ctx context.Context) {
+	if m.deps.Syncer == nil || !m.deps.Syncer.Configured() {
+		m.add("err", "Plane not configured (set base_url/token/slug/project in config)")
+		return
+	}
+	tasks, err := m.deps.Store.List(ctx, store.Filter{})
+	if err != nil {
+		m.add("err", err.Error())
+		return
+	}
+	pushed, failed := 0, 0
+	for _, t := range tasks {
+		tt := t
+		if err := m.deps.Syncer.Push(ctx, &tt); err != nil {
+			m.add("err", fmt.Sprintf("#%d %s: %v", t.ID, t.Label, err))
+			failed++
+		} else {
+			pushed++
+		}
+	}
+	m.add("sys", fmt.Sprintf("sync → Plane: %d pushed, %d failed", pushed, failed))
 }
 
 // showTask renders one task expanded following the activity template.

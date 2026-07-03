@@ -20,6 +20,7 @@ type TaskStore interface {
 	Get(ctx context.Context, id int64) (domain.Task, error)
 	List(ctx context.Context, f Filter) ([]domain.Task, error)
 	Update(ctx context.Context, t domain.Task) error
+	Delete(ctx context.Context, id int64) error
 	Close() error
 }
 

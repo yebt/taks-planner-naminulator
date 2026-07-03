@@ -49,7 +49,9 @@ func (s *SQLite) migrate() error {
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL,
   touched_at   INTEGER NOT NULL,
-  details      TEXT    NOT NULL DEFAULT ''
+  details      TEXT    NOT NULL DEFAULT '',
+  start_date   TEXT    NOT NULL DEFAULT '',
+  due_date     TEXT    NOT NULL DEFAULT ''
 );`,
 		`CREATE TABLE IF NOT EXISTS conversations (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,7 +75,12 @@ func (s *SQLite) migrate() error {
 		}
 	}
 	// Add columns introduced after the initial schema (for existing DBs).
-	return s.ensureColumn("tasks", "details", "TEXT NOT NULL DEFAULT ''")
+	for _, col := range []string{"details", "start_date", "due_date"} {
+		if err := s.ensureColumn("tasks", col, "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ensureColumn adds a column if the table doesn't already have it.
@@ -117,10 +124,10 @@ func (s *SQLite) Create(ctx context.Context, t domain.Task) (domain.Task, error)
 	}
 	details, _ := json.Marshal(t.Details)
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO tasks (label,type,title,description,status,state,work_item_id,created_at,updated_at,touched_at,details)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO tasks (label,type,title,description,status,state,work_item_id,created_at,updated_at,touched_at,details,start_date,due_date)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.Label, string(t.Type), t.Title, t.Description, string(t.Status), t.State, t.WorkItemID,
-		t.CreatedAt.Unix(), t.UpdatedAt.Unix(), t.TouchedAt.Unix(), string(details))
+		t.CreatedAt.Unix(), t.UpdatedAt.Unix(), t.TouchedAt.Unix(), string(details), t.StartDate, t.DueDate)
 	if err != nil {
 		return domain.Task{}, err
 	}
@@ -132,7 +139,7 @@ func (s *SQLite) Create(ctx context.Context, t domain.Task) (domain.Task, error)
 	return t, nil
 }
 
-const selectCols = `id,label,type,title,description,status,state,work_item_id,created_at,updated_at,touched_at,details`
+const selectCols = `id,label,type,title,description,status,state,work_item_id,created_at,updated_at,touched_at,details,start_date,due_date`
 
 // Get fetches a single task by id.
 func (s *SQLite) Get(ctx context.Context, id int64) (domain.Task, error) {
@@ -183,10 +190,10 @@ func (s *SQLite) Update(ctx context.Context, t domain.Task) error {
 	now := time.Now().UTC()
 	details, _ := json.Marshal(t.Details)
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE tasks SET label=?,type=?,title=?,description=?,status=?,state=?,work_item_id=?,updated_at=?,touched_at=?,details=?
+		`UPDATE tasks SET label=?,type=?,title=?,description=?,status=?,state=?,work_item_id=?,updated_at=?,touched_at=?,details=?,start_date=?,due_date=?
 		 WHERE id=?`,
 		t.Label, string(t.Type), t.Title, t.Description, string(t.Status), t.State, t.WorkItemID,
-		now.Unix(), now.Unix(), string(details), t.ID)
+		now.Unix(), now.Unix(), string(details), t.StartDate, t.DueDate, t.ID)
 	if err != nil {
 		return err
 	}
@@ -196,6 +203,22 @@ func (s *SQLite) Update(ctx context.Context, t domain.Task) error {
 	}
 	if n == 0 {
 		return fmt.Errorf("%w: id=%d", ErrNotFound, t.ID)
+	}
+	return nil
+}
+
+// Delete removes a task permanently.
+func (s *SQLite) Delete(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: id=%d", ErrNotFound, id)
 	}
 	return nil
 }
@@ -212,7 +235,7 @@ func scanRow(sc scanner) (domain.Task, error) {
 		created, updated, touched int64
 	)
 	err := sc.Scan(&t.ID, &t.Label, &typ, &t.Title, &t.Description, &status, &t.State, &t.WorkItemID,
-		&created, &updated, &touched, &details)
+		&created, &updated, &touched, &details, &t.StartDate, &t.DueDate)
 	if err != nil {
 		return domain.Task{}, err
 	}

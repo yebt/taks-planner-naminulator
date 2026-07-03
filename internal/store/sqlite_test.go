@@ -129,6 +129,25 @@ func TestMigrateAddsDetailsColumnToOldDB(t *testing.T) {
 	}
 }
 
+func TestDatesRoundtrip(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	created, err := s.Create(ctx, domain.Task{
+		Label: "feat-x", Type: domain.TypeFeat, Title: "X", Status: domain.StatusTodo,
+		StartDate: "2026-06-01", DueDate: "2026-06-02",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.StartDate != "2026-06-01" || got.DueDate != "2026-06-02" {
+		t.Fatalf("dates not persisted: %q %q", got.StartDate, got.DueDate)
+	}
+}
+
 func TestSQLiteNotFound(t *testing.T) {
 	s := newTestStore(t)
 	_, err := s.Get(context.Background(), 999)

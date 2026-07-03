@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/webcloster-dev/planner/internal/domain"
 	"github.com/webcloster-dev/planner/internal/llm"
@@ -15,10 +16,18 @@ import (
 	"github.com/webcloster-dev/planner/internal/store"
 )
 
-// Registry wires the tool set to a task store and (optionally) long-term memory.
+// Syncer pushes a task to Plane and refreshes states. Implemented by internal/plane.
+type Syncer interface {
+	Configured() bool
+	Push(ctx context.Context, t *domain.Task) error
+	PullStates(ctx context.Context) (int, error)
+}
+
+// Registry wires the tool set to a task store, long-term memory, and Plane sync.
 type Registry struct {
 	store store.TaskStore
 	mem   memory.Memory
+	sync  Syncer
 }
 
 // New builds a tool registry over a store.
@@ -27,7 +36,18 @@ func New(s store.TaskStore) *Registry { return &Registry{store: s} }
 // SetMemory enables the recall/remember tools when a memory backend is present.
 func (r *Registry) SetMemory(m memory.Memory) { r.mem = m }
 
+// SetSyncer enables automatic push to Plane after a task mutation.
+func (r *Registry) SetSyncer(s Syncer) { r.sync = s }
+
 func (r *Registry) memEnabled() bool { return r.mem != nil && r.mem.Available() }
+
+// pushSync best-effort pushes a task to Plane (local-first: sync errors don't
+// fail the local operation; the returned work_item reflects success).
+func (r *Registry) pushSync(ctx context.Context, t *domain.Task) {
+	if r.sync != nil && r.sync.Configured() {
+		_ = r.sync.Push(ctx, t)
+	}
+}
 
 // Definitions returns the provider-agnostic tool schemas.
 func (r *Registry) Definitions() []llm.Tool {
@@ -41,6 +61,8 @@ func (r *Registry) Definitions() []llm.Tool {
 				"description": strProp("Optional longer description"),
 				"label":       strProp("Optional short label; auto-generated from type+title if omitted"),
 				"status":      enumProp("Initial status", statuses()...),
+				"start_date":  strProp("Plane start date, YYYY-MM-DD"),
+				"due_date":    strProp("Plane due date (target date), YYYY-MM-DD"),
 			}, "type", "title"),
 		},
 		{
@@ -79,7 +101,14 @@ func (r *Registry) Definitions() []llm.Tool {
 				"acceptance_criteria": arrProp("Criterios de aceptación (Dado/Cuando/Entonces)"),
 				"preconditions":       arrProp("Pre-condiciones"),
 				"tech_notes":          strProp("Consideraciones técnicas"),
+				"start_date":          strProp("Plane start date, YYYY-MM-DD"),
+				"due_date":            strProp("Plane due date (target date), YYYY-MM-DD"),
 			}, "id"),
+		},
+		{
+			Name:        "drop_task",
+			Description: "Delete a task from the planner permanently.",
+			Parameters:  obj(props{"id": intProp("Task id")}, "id"),
 		},
 	}
 	if r.memEnabled() {
@@ -118,6 +147,8 @@ func (r *Registry) Dispatch(ctx context.Context, name, args string) (string, err
 		return r.setState(ctx, args)
 	case "set_details":
 		return r.setDetails(ctx, args)
+	case "drop_task":
+		return r.dropTask(ctx, args)
 	case "recall_memory":
 		return r.recallMemory(ctx, args)
 	case "remember_note":
@@ -165,6 +196,8 @@ func (r *Registry) createTask(ctx context.Context, args string) (string, error) 
 		Description string `json:"description"`
 		Label       string `json:"label"`
 		Status      string `json:"status"`
+		StartDate   string `json:"start_date"`
+		DueDate     string `json:"due_date"`
 	}
 	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
 		return "", fmt.Errorf("create_task: bad args: %w", err)
@@ -183,16 +216,24 @@ func (r *Registry) createTask(ctx context.Context, args string) (string, error) 
 	if !status.Valid() {
 		return "", fmt.Errorf("create_task: invalid status %q", in.Status)
 	}
+	if err := validDate("start_date", in.StartDate); err != nil {
+		return "", err
+	}
+	if err := validDate("due_date", in.DueDate); err != nil {
+		return "", err
+	}
 	label := in.Label
 	if label == "" {
 		label = fmt.Sprintf("%s-%s", strings.ToLower(string(tt)), slug(in.Title))
 	}
 	t, err := r.store.Create(ctx, domain.Task{
 		Label: label, Type: tt, Title: in.Title, Description: in.Description, Status: status,
+		StartDate: in.StartDate, DueDate: in.DueDate,
 	})
 	if err != nil {
 		return "", err
 	}
+	r.pushSync(ctx, &t)
 	return marshal(view(t))
 }
 
@@ -232,6 +273,7 @@ func (r *Registry) setStatus(ctx context.Context, args string) (string, error) {
 	if err := r.store.Update(ctx, t); err != nil {
 		return "", err
 	}
+	r.pushSync(ctx, &t)
 	return marshal(view(t))
 }
 
@@ -251,6 +293,7 @@ func (r *Registry) setState(ctx context.Context, args string) (string, error) {
 	if err := r.store.Update(ctx, t); err != nil {
 		return "", err
 	}
+	r.pushSync(ctx, &t)
 	return marshal(view(t))
 }
 
@@ -265,13 +308,27 @@ func (r *Registry) setDetails(ctx context.Context, args string) (string, error) 
 		AcceptanceCriteria []string `json:"acceptance_criteria"`
 		Preconditions      []string `json:"preconditions"`
 		TechNotes          string   `json:"tech_notes"`
+		StartDate          string   `json:"start_date"`
+		DueDate            string   `json:"due_date"`
 	}
 	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
 		return "", fmt.Errorf("set_details: bad args: %w", err)
 	}
+	if err := validDate("start_date", in.StartDate); err != nil {
+		return "", err
+	}
+	if err := validDate("due_date", in.DueDate); err != nil {
+		return "", err
+	}
 	t, err := r.store.Get(ctx, in.ID)
 	if err != nil {
 		return "", err
+	}
+	if in.StartDate != "" {
+		t.StartDate = in.StartDate
+	}
+	if in.DueDate != "" {
+		t.DueDate = in.DueDate
 	}
 	d := &t.Details
 	if in.Objective != "" {
@@ -301,26 +358,59 @@ func (r *Registry) setDetails(ctx context.Context, args string) (string, error) 
 	if err := r.store.Update(ctx, t); err != nil {
 		return "", err
 	}
+	r.pushSync(ctx, &t)
+	return marshal(view(t))
+}
+
+func (r *Registry) dropTask(ctx context.Context, args string) (string, error) {
+	var in struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("drop_task: bad args: %w", err)
+	}
+	// fetch first so the result can report which task was removed
+	t, err := r.store.Get(ctx, in.ID)
+	if err != nil {
+		return "", err
+	}
+	if err := r.store.Delete(ctx, in.ID); err != nil {
+		return "", err
+	}
 	return marshal(view(t))
 }
 
 // --- helpers ---
 
 type taskView struct {
-	ID       int64  `json:"id"`
-	Label    string `json:"label"`
-	Type     string `json:"type"`
-	Title    string `json:"title"`
-	Status   string `json:"status"`
-	State    string `json:"state,omitempty"`
-	WorkItem string `json:"work_item,omitempty"` // Plane id; empty = not synced yet
+	ID        int64  `json:"id"`
+	Label     string `json:"label"`
+	Type      string `json:"type"`
+	Title     string `json:"title"`
+	Status    string `json:"status"`
+	State     string `json:"state,omitempty"`
+	WorkItem  string `json:"work_item,omitempty"` // Plane id; empty = not synced yet
+	StartDate string `json:"start_date,omitempty"`
+	DueDate   string `json:"due_date,omitempty"`
 }
 
 func view(t domain.Task) taskView {
 	return taskView{
 		ID: t.ID, Label: t.Label, Type: string(t.Type), Title: t.Title,
 		Status: string(t.Status), State: t.State, WorkItem: t.WorkItemID,
+		StartDate: t.StartDate, DueDate: t.DueDate,
 	}
+}
+
+// validDate checks an optional YYYY-MM-DD date.
+func validDate(field, v string) error {
+	if v == "" {
+		return nil
+	}
+	if _, err := time.Parse("2006-01-02", v); err != nil {
+		return fmt.Errorf("%s must be YYYY-MM-DD, got %q", field, v)
+	}
+	return nil
 }
 
 func marshal(v any) (string, error) {

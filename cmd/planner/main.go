@@ -12,6 +12,7 @@ import (
 	"github.com/webcloster-dev/planner/internal/contextmgr"
 	"github.com/webcloster-dev/planner/internal/llm"
 	"github.com/webcloster-dev/planner/internal/memory"
+	"github.com/webcloster-dev/planner/internal/plane"
 	"github.com/webcloster-dev/planner/internal/store"
 	"github.com/webcloster-dev/planner/internal/tools"
 	"github.com/webcloster-dev/planner/internal/tui"
@@ -115,6 +116,14 @@ func runChat() error {
 	reg := tools.New(st)
 	reg.SetMemory(mem)
 
+	syncer := plane.NewSyncer(plane.New(plane.Config{
+		BaseURL:       cfg.Plane.BaseURL,
+		Token:         cfg.Plane.APIToken,
+		WorkspaceSlug: cfg.Plane.WorkspaceSlug,
+		ProjectID:     cfg.Plane.ProjectID,
+	}), st, cfg.Plane.StateDefaults)
+	reg.SetSyncer(syncer)
+
 	ag := agent.New(provider, reg, systemPrompt)
 	ag.SetWindow(contextmgr.New(cfg.ContextBudget))
 
@@ -126,6 +135,7 @@ func runChat() error {
 		Convos:     st,
 		Tools:      reg,
 		Memory:     mem,
+		Syncer:     syncer,
 		Build:      buildProvider,
 	})
 }

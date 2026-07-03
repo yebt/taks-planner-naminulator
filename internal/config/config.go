@@ -15,11 +15,15 @@ import (
 // asked from the user (can't be inferred via API); ProjectID is selected from
 // the API or entered manually.
 type PlaneConfig struct {
+	BaseURL       string            `json:"base_url,omitempty"` // e.g. https://planner.webcloster.cloud
 	APIToken      string            `json:"api_token,omitempty"`
 	WorkspaceSlug string            `json:"workspace_slug,omitempty"`
 	ProjectID     string            `json:"project_id,omitempty"`
 	StateDefaults map[string]string `json:"state_defaults,omitempty"` // group -> default state name
 }
+
+// DefaultPlaneBaseURL is the self-hosted Plane host used unless overridden.
+const DefaultPlaneBaseURL = "https://planner.webcloster.cloud"
 
 // MemoryConfig configures the long-term memory backend (Engram).
 type MemoryConfig struct {
@@ -46,11 +50,13 @@ func Default() Config {
 		ActiveProvider: "ollama",
 		DBPath:         DefaultDBPath(),
 		ContextBudget:  DefaultContextBudget,
+		Plane:          PlaneConfig{BaseURL: DefaultPlaneBaseURL},
 		Providers: map[string]llm.ProviderConfig{
 			"ollama":   {Kind: "custom", Label: "ollama", BaseURL: "http://localhost:11434/v1", APIKey: "ollama", Model: "llama3.1"},
 			"openai":   {Kind: "openai", Label: "openai", Model: "gpt-4o-mini"},
 			"moonshot": {Kind: "moonshot", Label: "moonshot", Model: "moonshot-v1-8k"},
 			"kimi":     {Kind: "kimi", Label: "kimi", Model: "kimi-k2-0711-preview"},
+			"groq":     {Kind: "groq", Label: "groq", Model: "llama-3.3-70b-versatile"},
 			"claude":   {Kind: "claude", Label: "claude", Model: "claude-opus-4-8"},
 		},
 	}
@@ -95,6 +101,9 @@ func Load(path string) (Config, error) {
 	}
 	if c.ContextBudget <= 0 {
 		c.ContextBudget = DefaultContextBudget
+	}
+	if c.Plane.BaseURL == "" {
+		c.Plane.BaseURL = DefaultPlaneBaseURL
 	}
 	return c, nil
 }
