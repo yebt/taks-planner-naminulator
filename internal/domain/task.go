@@ -1,6 +1,11 @@
 package domain
 
-import "time"
+import (
+	"fmt"
+	"html"
+	"strings"
+	"time"
+)
 
 // TaskType is the activity type from the naming scheme (docs/template-tasks.md).
 type TaskType string
@@ -59,13 +64,98 @@ type Task struct {
 	Description string
 	Status      Status
 	State       string // Plane state name (e.g. "In Progress"); empty until mapped
-	WorkItemID  string // Plane work item id; empty until synced
+	WorkItemID  string // Plane work item id (uuid); empty until synced
+	WorkItemSeq int    // Plane sequence id (the "#343" in LIQMSTR-343); 0 until synced
 	StartDate   string // YYYY-MM-DD (Plane start_date); required by Plane work items
 	DueDate     string // YYYY-MM-DD (Plane target_date)
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	TouchedAt   time.Time   // last interaction — drives the daily
 	Details     TaskDetails // extended activity-template fields
+}
+
+// DisplayTitle is the work-item title: "[TYPE] - #<seq> - <title>". The Plane
+// code (#seq) is only present once the item has been created and its sequence
+// id is known; before that the code segment is omitted.
+func (t Task) DisplayTitle() string {
+	if t.WorkItemSeq > 0 {
+		return fmt.Sprintf("[%s] - #%d - %s", t.Type, t.WorkItemSeq, t.Title)
+	}
+	return fmt.Sprintf("[%s] - %s", t.Type, t.Title)
+}
+
+// RenderHTML builds the Plane work-item body (description_html) from the
+// description and the activity-template fields, as rich-text HTML. Empty
+// sections are skipped. Section labels follow the Spanish activity template.
+func (t Task) RenderHTML() string {
+	var b strings.Builder
+	esc := html.EscapeString
+	h := func(s string) { b.WriteString("<h2>" + esc(s) + "</h2>") }
+	p := func(s string) {
+		if strings.TrimSpace(s) != "" {
+			b.WriteString("<p>" + esc(s) + "</p>")
+		}
+	}
+	section := func(title, body string) {
+		if strings.TrimSpace(body) != "" {
+			h(title)
+			p(body)
+		}
+	}
+	list := func(title string, items []string) {
+		if len(items) == 0 {
+			return
+		}
+		h(title)
+		b.WriteString("<ul>")
+		for _, it := range items {
+			b.WriteString("<li>" + esc(it) + "</li>")
+		}
+		b.WriteString("</ul>")
+	}
+
+	d := t.Details
+	if strings.TrimSpace(t.Description) != "" {
+		h("Descripción funcional")
+		p(t.Description)
+	}
+	section("Objetivo", d.Objective)
+	section("Justificación", d.Justification)
+	if d.AsA != "" || d.IWant != "" || d.SoThat != "" {
+		h("Historia de usuario")
+		b.WriteString("<p>Como " + esc(orEmpty(d.AsA)) +
+			"<br/>Quiero " + esc(orEmpty(d.IWant)) +
+			"<br/>Para " + esc(orEmpty(d.SoThat)) + "</p>")
+	}
+	list("Pre-condiciones", d.Preconditions)
+	list("Criterios de aceptación", d.AcceptanceCriteria)
+	section("Consideraciones técnicas", d.TechNotes)
+	section("Funcionalidad relacionada", d.RelatedFeature)
+	section("Ambiente", d.Environment)
+	list("Pasos a reproducir", d.StepsToReproduce)
+	section("Resultado actual", d.ActualResult)
+	section("Resultado esperado", d.ExpectedResult)
+	if len(d.Checklist) > 0 {
+		h("Checklist")
+		b.WriteString("<ul>")
+		for _, it := range d.Checklist {
+			mark := "[ ] "
+			if it.Done {
+				mark = "[x] "
+			}
+			b.WriteString("<li>" + esc(mark+it.Text) + "</li>")
+		}
+		b.WriteString("</ul>")
+	}
+	list("Anexos", d.Links)
+	return b.String()
+}
+
+func orEmpty(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "—"
+	}
+	return s
 }
 
 // ChecklistItem is one deliverable in a task's checklist.

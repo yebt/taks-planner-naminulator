@@ -65,10 +65,10 @@ func (s *Syncer) stateNameByID(ctx context.Context, id string) string {
 
 func (s *Syncer) issueInput(ctx context.Context, t *domain.Task) IssueInput {
 	in := IssueInput{
-		Name:        fmt.Sprintf("%s - %s", t.Type, t.Title),
-		Description: t.Description,
-		StartDate:   t.StartDate,
-		TargetDate:  t.DueDate,
+		Name:       t.DisplayTitle(), // "[TYPE] - #<seq> - <title>"
+		HTML:       t.RenderHTML(),   // template-expanded rich-text body
+		StartDate:  t.StartDate,
+		TargetDate: t.DueDate,
 	}
 	if t.State != "" {
 		in.StateID = s.stateIDByName(ctx, t.State)
@@ -76,22 +76,38 @@ func (s *Syncer) issueInput(ctx context.Context, t *domain.Task) IssueInput {
 	return in
 }
 
-// Push creates (or updates) the work item for t and persists work_item_id.
+// Push creates (or updates) the work item for t and persists work_item_id and
+// work_item_seq. On first create, the item is renamed once the Plane sequence
+// number is known, so the title carries the "#<seq>" code.
 func (s *Syncer) Push(ctx context.Context, t *domain.Task) error {
 	if !s.Configured() {
 		return nil
 	}
-	in := s.issueInput(ctx, t)
 	if t.WorkItemID == "" {
-		id, err := s.client.CreateIssue(ctx, in)
+		ref, err := s.client.CreateIssue(ctx, s.issueInput(ctx, t))
 		if err != nil {
 			return err
 		}
-		t.WorkItemID = id
-	} else if err := s.client.UpdateIssue(ctx, t.WorkItemID, in); err != nil {
+		t.WorkItemID = ref.ID
+		t.WorkItemSeq = ref.Seq
+		// Rename now that the code exists so the title reads "[TYPE] - #343 - …".
+		if ref.Seq > 0 {
+			if err := s.client.UpdateIssue(ctx, ref.ID, IssueInput{Name: t.DisplayTitle()}); err != nil {
+				return err
+			}
+		}
+	} else if err := s.client.UpdateIssue(ctx, t.WorkItemID, s.issueInput(ctx, t)); err != nil {
 		return err
 	}
 	return s.store.Update(ctx, *t)
+}
+
+// Delete removes the work item in Plane. No-op when the task was never synced.
+func (s *Syncer) Delete(ctx context.Context, t *domain.Task) error {
+	if !s.Configured() || t.WorkItemID == "" {
+		return nil
+	}
+	return s.client.DeleteIssue(ctx, t.WorkItemID)
 }
 
 // PullStates refreshes local state names from Plane for synced tasks. Returns

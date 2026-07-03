@@ -41,10 +41,18 @@ func (c *Client) Configured() bool {
 // IssueInput is the subset of Plane issue fields we set.
 type IssueInput struct {
 	Name        string
-	Description string // plain text; wrapped as description_html
+	Description string // plain text; wrapped as description_html (used when HTML is empty)
+	HTML        string // pre-rendered rich-text body; takes precedence over Description
 	StartDate   string // YYYY-MM-DD or ""
 	TargetDate  string // YYYY-MM-DD or "" (Plane's "Due date")
 	StateID     string // optional Plane state uuid
+}
+
+// IssueRef identifies a work item after creation: its uuid and the project
+// sequence number (the "#343" shown in Plane, e.g. LIQMSTR-343).
+type IssueRef struct {
+	ID  string
+	Seq int
 }
 
 // State is a Plane workflow state.
@@ -61,7 +69,10 @@ func (c *Client) base() string {
 
 func (in IssueInput) body() map[string]any {
 	b := map[string]any{"name": in.Name}
-	if in.Description != "" {
+	switch {
+	case in.HTML != "":
+		b["description_html"] = in.HTML
+	case in.Description != "":
 		b["description_html"] = "<p>" + html.EscapeString(in.Description) + "</p>"
 	}
 	if in.StartDate != "" {
@@ -76,23 +87,29 @@ func (in IssueInput) body() map[string]any {
 	return b
 }
 
-// CreateIssue creates a work item and returns its id.
-func (c *Client) CreateIssue(ctx context.Context, in IssueInput) (string, error) {
+// CreateIssue creates a work item and returns its id and sequence number.
+func (c *Client) CreateIssue(ctx context.Context, in IssueInput) (IssueRef, error) {
 	var out struct {
-		ID string `json:"id"`
+		ID         string `json:"id"`
+		SequenceID int    `json:"sequence_id"`
 	}
 	if err := c.do(ctx, http.MethodPost, c.base()+"/issues/", in.body(), &out); err != nil {
-		return "", err
+		return IssueRef{}, err
 	}
 	if out.ID == "" {
-		return "", fmt.Errorf("plane: create issue returned no id")
+		return IssueRef{}, fmt.Errorf("plane: create issue returned no id")
 	}
-	return out.ID, nil
+	return IssueRef{ID: out.ID, Seq: out.SequenceID}, nil
 }
 
 // UpdateIssue patches an existing work item.
 func (c *Client) UpdateIssue(ctx context.Context, id string, in IssueInput) error {
 	return c.do(ctx, http.MethodPatch, c.base()+"/issues/"+id+"/", in.body(), nil)
+}
+
+// DeleteIssue removes a work item from Plane.
+func (c *Client) DeleteIssue(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, c.base()+"/issues/"+id+"/", nil, nil)
 }
 
 // ListStates returns the project's workflow states.

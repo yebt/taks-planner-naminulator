@@ -32,6 +32,7 @@ type Syncer interface {
 	Configured() bool
 	Push(ctx context.Context, t *domain.Task) error
 	PullStates(ctx context.Context) (int, error)
+	Delete(ctx context.Context, t *domain.Task) error
 }
 
 // ChatDeps wires the harness to the rest of the app.
@@ -113,6 +114,12 @@ type entry struct {
 
 type suggestion struct{ full, desc string }
 
+// pendingConfirm is a y/n gate for a destructive action (e.g. cloud delete).
+type pendingConfirm struct {
+	prompt string
+	action func()
+}
+
 type chatModel struct {
 	deps        ChatDeps
 	ta          textarea.Model
@@ -124,10 +131,11 @@ type chatModel struct {
 	suggestions []suggestion
 	selected    int
 	thinking    bool
-	quitArmed   bool     // first ctrl+c clears; second quits
-	history     []string // submitted inputs, for ↑/↓ recall
-	histPos     int      // -1 = not navigating
-	convID      int64    // 0 = unsaved
+	quitArmed   bool            // first ctrl+c clears; second quits
+	confirm     *pendingConfirm // non-nil while awaiting y/n
+	history     []string        // submitted inputs, for ↑/↓ recall
+	histPos     int             // -1 = not navigating
+	convID      int64           // 0 = unsaved
 }
 
 type replyMsg struct {
@@ -185,6 +193,21 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.quitArmed = false // any other key disarms
+
+	// Awaiting a y/n confirmation: swallow every other key until decided.
+	if m.confirm != nil {
+		switch msg.String() {
+		case "y", "Y":
+			act := m.confirm.action
+			m.confirm = nil
+			act()
+		case "n", "N", "esc":
+			m.confirm = nil
+			m.add("sys", "cancelled.")
+		}
+		m.layout()
+		return m, nil
+	}
 
 	// Suggestion menu open: navigate / complete / submit-if-complete.
 	if len(m.suggestions) > 0 {
@@ -356,7 +379,7 @@ var baseCommands = []suggestion{
 	{"/task", "/task <id> — show a task in full"},
 	{"/new", "/new <TYPE> <title> — create a task (no LLM)"},
 	{"/status", "/status <id> <status> — change a task status"},
-	{"/drop", "/drop <id> — delete a task"},
+	{"/drop", "/drop <id> [sync] — delete a task (sync also removes it in Plane)"},
 	{"/model", "switch LLM provider"},
 	{"/key", "/key <provider> <apikey> — set & save an API key"},
 	{"/save", "save this conversation"},
@@ -434,15 +457,24 @@ func (m *chatModel) runCommand(val string) tea.Cmd {
 
 	case "/drop":
 		if len(fields) < 2 {
-			m.add("err", "usage: /drop <id>")
+			m.add("err", "usage: /drop <id> [sync]")
 			break
 		}
-		if _, err := strconv.ParseInt(fields[1], 10, 64); err != nil {
+		id, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
 			m.add("err", "id must be a number")
 			break
 		}
-		out, err := m.deps.Tools.Dispatch(ctx, "drop_task", fmt.Sprintf(`{"id":%s}`, fields[1]))
-		m.report("dropped: ", out, err)
+		withSync := len(fields) > 2 && (fields[2] == "sync" || fields[2] == "--sync")
+		if withSync {
+			m.confirm = &pendingConfirm{
+				prompt: fmt.Sprintf("delete #%d locally AND in Plane? press y to confirm, n to cancel", id),
+				action: func() { m.dropTask(context.Background(), id, true) },
+			}
+			m.add("sys", m.confirm.prompt)
+			break
+		}
+		m.dropTask(ctx, id, false)
 
 	case "/model":
 		if len(fields) < 2 {
@@ -544,13 +576,66 @@ func (m *chatModel) showTodos(ctx context.Context) {
 		m.add("sys", "no tasks yet.")
 		return
 	}
+	typeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111"))
+	idStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
+
 	var b strings.Builder
+	b.WriteString(botLabel.Render(fmt.Sprintf("todos · %d", len(tasks))) + "\n\n")
 	for _, t := range tasks {
-		b.WriteString(fmt.Sprintf("%3d  [%s] %-6s %-32s %s\n",
-			t.ID, t.Label, t.Type, trunc(t.Title, 32), t.Status))
+		st := statusStyleFor(t.Status)
+		line := fmt.Sprintf("%s %s  %s  %-40s  %s",
+			st.Render("●"),
+			idStyle.Render(fmt.Sprintf("%3d", t.ID)),
+			typeStyle.Render(fmt.Sprintf("%-6s", t.Type)),
+			trunc(t.Title, 40),
+			st.Render(string(t.Status)))
+		switch {
+		case t.WorkItemSeq > 0:
+			line += helpStyle.Render(fmt.Sprintf("  #%d", t.WorkItemSeq))
+		case t.WorkItemID != "":
+			line += helpStyle.Render("  ⇅")
+		}
+		b.WriteString(line + "\n")
 	}
-	b.WriteString("\nuse: /task <id> for detail")
-	m.add("sys", strings.TrimRight(b.String(), "\n"))
+	b.WriteString("\n" + helpStyle.Render("/task <id> for detail · /drop <id> [sync] to remove"))
+	m.add("raw", strings.TrimRight(b.String(), "\n"))
+}
+
+// statusStyleFor maps a task status to a color so the list scans at a glance.
+func statusStyleFor(s domain.Status) lipgloss.Style {
+	var c lipgloss.Color
+	switch s {
+	case domain.StatusDone:
+		c = "42" // green
+	case domain.StatusInProgress:
+		c = "214" // orange
+	case domain.StatusTodo:
+		c = "39" // blue
+	case domain.StatusBlocked, domain.StatusRejected:
+		c = "203" // red
+	case domain.StatusBacklog, domain.StatusPostponed:
+		c = "245" // gray
+	case domain.StatusCancelled:
+		c = "240" // dim gray
+	default:
+		c = "252"
+	}
+	return lipgloss.NewStyle().Foreground(c)
+}
+
+// dropTask deletes a task locally, and (when withSync) removes its Plane work
+// item first — aborting the local delete if the cloud delete fails.
+func (m *chatModel) dropTask(ctx context.Context, id int64, withSync bool) {
+	if withSync && m.deps.Syncer != nil && m.deps.Syncer.Configured() {
+		if t, err := m.deps.Store.Get(ctx, id); err == nil && t.WorkItemID != "" {
+			if err := m.deps.Syncer.Delete(ctx, &t); err != nil {
+				m.add("err", "Plane delete failed (task kept): "+err.Error())
+				return
+			}
+		}
+	}
+	out, err := m.deps.Tools.Dispatch(ctx, "drop_task", fmt.Sprintf(`{"id":%d}`, id))
+	m.report("dropped: ", out, err)
 }
 
 // syncAll pushes every local task to Plane, reporting failures individually.
@@ -905,6 +990,7 @@ func (m *chatModel) setContent() {
 	}
 	body := lipgloss.NewStyle().Width(w)
 	bubble := lipgloss.NewStyle().Background(userBubbleBG).Foreground(lipgloss.Color("252")).Padding(0, 1).Width(w)
+	cmdBubble := lipgloss.NewStyle().Background(userBubbleBG).Foreground(lipgloss.Color("213")).Padding(0, 1).Width(w)
 	blocks := make([]string, 0, len(m.entries))
 	for _, e := range m.entries {
 		switch e.role {
@@ -913,7 +999,7 @@ func (m *chatModel) setContent() {
 		case "planner":
 			blocks = append(blocks, botLabel.Render("planner")+"\n"+body.Render(e.text))
 		case "cmd":
-			blocks = append(blocks, cmdStyle.Render(e.text))
+			blocks = append(blocks, cmdBubble.Render(e.text))
 		case "tool":
 			blocks = append(blocks, toolStyle.Render(e.text))
 		case "err":

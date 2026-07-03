@@ -30,18 +30,18 @@ func TestCreateIssue(t *testing.T) {
 		key, path, method = r.Header.Get("X-API-Key"), r.URL.Path, r.Method
 		b, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(b, &body)
-		w.Write([]byte(`{"id":"issue-123"}`))
+		w.Write([]byte(`{"id":"issue-123","sequence_id":343}`))
 	}))
 	defer srv.Close()
 
-	id, err := testClient(srv.URL).CreateIssue(context.Background(), IssueInput{
+	ref, err := testClient(srv.URL).CreateIssue(context.Background(), IssueInput{
 		Name: "FEAT - x", Description: "do it", StartDate: "2026-06-01", TargetDate: "2026-06-02",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id != "issue-123" {
-		t.Fatalf("id: %q", id)
+	if ref.ID != "issue-123" || ref.Seq != 343 {
+		t.Fatalf("ref: %+v", ref)
 	}
 	if key != "tok" || method != http.MethodPost {
 		t.Fatalf("auth/method: %q %q", key, method)

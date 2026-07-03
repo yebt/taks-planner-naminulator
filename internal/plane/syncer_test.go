@@ -2,6 +2,8 @@ package plane
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,12 +14,20 @@ import (
 )
 
 func TestSyncerPushCreatesAndPersists(t *testing.T) {
+	var patchedName string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet { // ListStates lookup
+		switch r.Method {
+		case http.MethodGet: // ListStates lookup
 			w.Write([]byte(`{"results":[]}`))
-			return
+		case http.MethodPatch: // rename with the Plane code
+			var body map[string]any
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &body)
+			patchedName, _ = body["name"].(string)
+			w.Write([]byte(`{}`))
+		default: // create issue
+			w.Write([]byte(`{"id":"wi-1","sequence_id":7}`))
 		}
-		w.Write([]byte(`{"id":"wi-1"}`)) // create issue
 	}))
 	defer srv.Close()
 
@@ -37,12 +47,15 @@ func TestSyncerPushCreatesAndPersists(t *testing.T) {
 	if err := sy.Push(context.Background(), &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.WorkItemID != "wi-1" {
-		t.Fatalf("work item id not set on task: %q", created.WorkItemID)
+	if created.WorkItemID != "wi-1" || created.WorkItemSeq != 7 {
+		t.Fatalf("work item not set on task: id=%q seq=%d", created.WorkItemID, created.WorkItemSeq)
+	}
+	if patchedName != "[FEAT] - #7 - X" {
+		t.Fatalf("rename did not embed the code: %q", patchedName)
 	}
 	got, _ := st.Get(context.Background(), created.ID)
-	if got.WorkItemID != "wi-1" {
-		t.Fatalf("work item id not persisted: %q", got.WorkItemID)
+	if got.WorkItemID != "wi-1" || got.WorkItemSeq != 7 {
+		t.Fatalf("work item not persisted: id=%q seq=%d", got.WorkItemID, got.WorkItemSeq)
 	}
 }
 
