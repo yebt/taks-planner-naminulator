@@ -166,6 +166,7 @@ type chatModel struct {
 
 	// mouse selection (anchored in content-line coords so it survives scroll)
 	selecting    bool
+	dragged      bool // true once motion/scroll happens after press (so a plain click won't copy)
 	selActive    bool
 	selStart     int
 	selEnd       int
@@ -413,6 +414,8 @@ func (m *chatModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		if m.selecting {
+			m.dragged = true // scrolling mid-press counts as extending the selection
+			m.selActive = true
 			m.selEnd = m.contentLineAt(msg.Y)
 			m.setContent()
 		}
@@ -421,20 +424,28 @@ func (m *chatModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch msg.Action {
 	case tea.MouseActionPress:
 		if msg.Button == tea.MouseButtonLeft {
+			// Anchor the selection but don't highlight or copy yet — a plain
+			// click (no motion) must do nothing.
 			m.selecting = true
-			m.selActive = true
+			m.dragged = false
 			m.selStart = m.contentLineAt(msg.Y)
 			m.selEnd = m.selStart
-			m.setContent()
 		}
 	case tea.MouseActionMotion:
 		if m.selecting {
+			m.dragged = true
+			m.selActive = true
 			m.selEnd = m.contentLineAt(msg.Y)
 			m.setContent()
 		}
 	case tea.MouseActionRelease:
 		if m.selecting {
 			m.selecting = false
+			// A plain click (no drag) clears everything without copying.
+			if !m.dragged {
+				m.selActive = false
+				return m, nil
+			}
 			m.selEnd = m.contentLineAt(msg.Y)
 			text := m.selectedText()
 			m.setContent()
