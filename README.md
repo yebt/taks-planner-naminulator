@@ -1,5 +1,7 @@
 # planner
 
+![planner banner](assets/planner_banner.jpg)
+
 A personal planning agent: a terminal chat harness backed by an LLM with tools
 that keep a local SQLite task board in sync with a self-hosted
 [Plane](https://plane.so) instance, plus daily digests delivered to Telegram.
