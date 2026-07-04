@@ -74,6 +74,20 @@ func (a *Agent) SetHistory(msgs []llm.Message) { a.messages = msgs }
 // Provider returns the active provider name.
 func (a *Agent) Provider() string { return a.provider.Name() }
 
+// Oneshot runs a single stateless completion (system + user, no tools) without
+// touching the conversation history. Used for side tasks like the daily digest.
+func (a *Agent) Oneshot(ctx context.Context, system, user string) (string, error) {
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: user}}
+	if system != "" {
+		msgs = append([]llm.Message{{Role: llm.RoleSystem, Content: system}}, msgs...)
+	}
+	resp, err := a.provider.Chat(ctx, msgs, nil)
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
+}
+
 // Send runs one user turn to completion, executing tools as needed, and returns
 // the model's final text.
 func (a *Agent) Send(ctx context.Context, input string) (string, error) {

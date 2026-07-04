@@ -163,6 +163,14 @@ type replyMsg struct {
 	err  error
 }
 
+// dailyMsg carries the result of an async daily generation; fallback is the
+// deterministic digest used when the model call fails or returns nothing.
+type dailyMsg struct {
+	text     string
+	fallback string
+	err      error
+}
+
 func (m *chatModel) Init() tea.Cmd { return textarea.Blink }
 
 func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -184,6 +192,21 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.autosave()
 		}
+		m.layout()
+		return m, nil
+
+	case dailyMsg:
+		m.thinking = false
+		text := strings.TrimSpace(msg.text)
+		if msg.err != nil || text == "" {
+			text = msg.fallback
+			if msg.err != nil {
+				m.add("sys", "LLM daily failed, using basic format: "+msg.err.Error())
+			}
+		}
+		m.dailyDraft = text
+		m.add("raw", m.dailyDraft)
+		m.add("sys", "daily draft ready — /daily edit to tweak, /daily send to deliver.")
 		m.layout()
 		return m, nil
 
@@ -655,7 +678,7 @@ func (m *chatModel) runCommand(val string) tea.Cmd {
 		case len(fields) > 1 && fields[1] == "send":
 			m.sendDaily(ctx)
 		default:
-			m.generateDaily(ctx)
+			return m.generateDailyCmd(ctx)
 		}
 
 	default:
@@ -780,17 +803,77 @@ func (m *chatModel) dropTask(ctx context.Context, id int64, withSync bool) {
 	m.report("dropped: ", out, err)
 }
 
-// generateDaily builds the digest from today's activity, stores it as the draft,
-// and shows it (copyable from the terminal).
-func (m *chatModel) generateDaily(ctx context.Context) {
+// dailyPrompt is the "skill" that shapes the daily: it turns the day's tasks
+// into a professional Spanish narrative with the fixed Trabajo/Bloqueos/Notas
+// layout and the +/#/>> markers.
+const dailyPrompt = `Sos un asistente que redacta el "daily" de trabajo de un desarrollador a partir de sus tareas del día.
+Escribí en español neutro-profesional, en prosa nominalizada (ej: "Identificación de anomalías en la ejecución de CRONs...", "Validación del proceso de migración...").
+No copies los títulos tal cual: reformulálos como acciones concretas y claras. No inventes tareas que no estén en la lista.
+
+Devolvé EXACTAMENTE este formato, sin texto adicional ni encabezados markdown:
+
+Daily:  <FECHA>
+
+Trabajo:
+  + <una línea por cada tarea trabajada, hecha o en progreso>
+
+Bloqueos:
+  # <una línea por cada bloqueo>
+
+Notas:
+  >> <observaciones o recomendaciones técnicas relevantes>
+
+Reglas:
+- Usá <FECHA> tal como te la paso.
+- Prefijos exactos: "  + ", "  # ", "  >> ".
+- Si una sección no tiene contenido, omitila por completo (incluyendo su título).`
+
+// generateDailyCmd gathers today's tasks and asks the model to draft the daily
+// asynchronously; the deterministic buildDaily is passed as a fallback.
+func (m *chatModel) generateDailyCmd(ctx context.Context) tea.Cmd {
 	tasks, err := m.deps.Store.List(ctx, store.Filter{TouchedToday: true})
 	if err != nil {
 		m.add("err", err.Error())
-		return
+		return nil
 	}
-	m.dailyDraft = buildDaily(tasks)
-	m.add("raw", m.dailyDraft)
-	m.add("sys", "daily draft ready — /daily edit to tweak, /daily send to deliver.")
+	date := dailyDate(time.Now())
+	m.thinking = true
+	m.add("sys", "generating daily…")
+	m.layout()
+	return dailyCmd(m.deps.Agent, serializeTasksForDaily(date, tasks), buildDaily(date, tasks))
+}
+
+func dailyCmd(a *agent.Agent, userMsg, fallback string) tea.Cmd {
+	return func() tea.Msg {
+		out, err := a.Oneshot(context.Background(), dailyPrompt, userMsg)
+		return dailyMsg{text: out, fallback: fallback, err: err}
+	}
+}
+
+// serializeTasksForDaily renders the day's tasks as material for the model.
+func serializeTasksForDaily(date string, tasks []domain.Task) string {
+	var b strings.Builder
+	b.WriteString("FECHA: " + date + "\n\nTareas del día:\n")
+	if len(tasks) == 0 {
+		b.WriteString("(ninguna)\n")
+	}
+	for _, t := range tasks {
+		b.WriteString(fmt.Sprintf("- [%s] estado=%s: %s", t.Type, t.Status, t.Title))
+		if o := strings.TrimSpace(t.Details.Objective); o != "" {
+			b.WriteString(" | objetivo: " + o)
+		}
+		if n := strings.TrimSpace(t.Details.TechNotes); n != "" {
+			b.WriteString(" | nota: " + n)
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// dailyDate formats a date as "2006-01-02 MON" with a Spanish month abbrev.
+func dailyDate(t time.Time) string {
+	months := []string{"ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"}
+	return t.Format("2006-01-02") + " " + months[int(t.Month())-1]
 }
 
 // editDaily loads the current draft into the textarea for inline editing.
@@ -823,44 +906,42 @@ func (m *chatModel) sendDaily(ctx context.Context) {
 	m.add("sys", "daily sent to Telegram ✓")
 }
 
-// buildDaily renders today's touched tasks as a markdown digest, grouped by
-// status in workflow order.
-func buildDaily(tasks []domain.Task) string {
+// buildDaily is the deterministic fallback digest (used when the LLM call
+// fails): work items (+), blocks (#) and notes (>>) under the fixed layout.
+func buildDaily(date string, tasks []domain.Task) string {
 	var b strings.Builder
-	b.WriteString("# Daily — " + time.Now().Format("2006-01-02") + "\n")
+	b.WriteString("Daily:  " + date + "\n")
+	var work, blocks, notes []string
+	for _, t := range tasks {
+		code := ""
+		if t.WorkItemSeq > 0 {
+			code = fmt.Sprintf("#%d ", t.WorkItemSeq)
+		}
+		line := fmt.Sprintf("[%s] %s%s", t.Type, code, t.Title)
+		switch t.Status {
+		case domain.StatusBlocked, domain.StatusRejected:
+			blocks = append(blocks, line)
+		default:
+			work = append(work, line)
+		}
+		if n := strings.TrimSpace(t.Details.TechNotes); n != "" {
+			notes = append(notes, n)
+		}
+	}
+	section := func(title, prefix string, items []string) {
+		if len(items) == 0 {
+			return
+		}
+		b.WriteString("\n" + title + ":\n")
+		for _, it := range items {
+			b.WriteString("  " + prefix + " " + it + "\n")
+		}
+	}
+	section("Trabajo", "+", work)
+	section("Bloqueos", "#", blocks)
+	section("Notas", ">>", notes)
 	if len(tasks) == 0 {
-		b.WriteString("\n_Sin actividad registrada hoy._")
-		return b.String()
-	}
-	order := []struct {
-		status domain.Status
-		label  string
-	}{
-		{domain.StatusInProgress, "En progreso"},
-		{domain.StatusDone, "Hecho"},
-		{domain.StatusBlocked, "Bloqueadas"},
-		{domain.StatusRejected, "Devueltas por Calidad"},
-		{domain.StatusTodo, "Por hacer"},
-		{domain.StatusPostponed, "Pospuestas"},
-		{domain.StatusBacklog, "Backlog"},
-		{domain.StatusCancelled, "Canceladas"},
-	}
-	for _, grp := range order {
-		var lines []string
-		for _, t := range tasks {
-			if t.Status != grp.status {
-				continue
-			}
-			code := ""
-			if t.WorkItemSeq > 0 {
-				code = fmt.Sprintf("#%d ", t.WorkItemSeq)
-			}
-			lines = append(lines, fmt.Sprintf("- [%s] %s%s", t.Type, code, t.Title))
-		}
-		if len(lines) > 0 {
-			b.WriteString("\n## " + grp.label + "\n")
-			b.WriteString(strings.Join(lines, "\n") + "\n")
-		}
+		b.WriteString("\n(sin actividad registrada hoy)")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
