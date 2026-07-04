@@ -14,6 +14,7 @@ import (
 	"github.com/webcloster-dev/planner/internal/memory"
 	"github.com/webcloster-dev/planner/internal/plane"
 	"github.com/webcloster-dev/planner/internal/store"
+	"github.com/webcloster-dev/planner/internal/telegram"
 	"github.com/webcloster-dev/planner/internal/tools"
 	"github.com/webcloster-dev/planner/internal/tui"
 )
@@ -128,6 +129,8 @@ func runChat() error {
 	ag := agent.New(provider, reg, systemPrompt)
 	ag.SetWindow(contextmgr.New(cfg.ContextBudget))
 
+	tg := telegram.New(cfg.Telegram.BotToken, cfg.Telegram.ChatID, cfg.Telegram.ThreadID)
+
 	return tui.RunChat(tui.ChatDeps{
 		Cfg:        &cfg,
 		ConfigPath: path,
@@ -137,6 +140,7 @@ func runChat() error {
 		Tools:      reg,
 		Memory:     mem,
 		Syncer:     syncer,
+		Telegram:   tg,
 		Build:      buildProvider,
 	})
 }

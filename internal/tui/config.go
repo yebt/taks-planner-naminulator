@@ -13,6 +13,7 @@ import (
 
 	"github.com/webcloster-dev/planner/internal/config"
 	"github.com/webcloster-dev/planner/internal/plane"
+	"github.com/webcloster-dev/planner/internal/telegram"
 )
 
 // planeGroups are Plane's five fixed state groups, in workflow order.
@@ -165,7 +166,22 @@ func (m *configModel) telegramFields() []cfgField {
 		{label: "thread id (optional)",
 			get: func() string { return T.ThreadID },
 			set: func(v string) { T.ThreadID = strings.TrimSpace(v) }},
+		{label: "✈ send test notification", action: m.testTelegram},
 	}
+}
+
+// testTelegram sends a test message so the user can confirm token/chat/thread
+// end-to-end from within the config.
+func (m *configModel) testTelegram() string {
+	T := m.cfg.Telegram
+	if !T.Ready() {
+		return "fill bot token + chat id first"
+	}
+	cl := telegram.New(T.BotToken, T.ChatID, T.ThreadID)
+	if err := cl.Test(context.Background()); err != nil {
+		return "test failed: " + err.Error()
+	}
+	return "test sent ✓ — check your Telegram chat"
 }
 
 // fetchStates pulls the project's workflow states from Plane and caches them,

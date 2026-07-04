@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -35,6 +36,12 @@ type Syncer interface {
 	Delete(ctx context.Context, t *domain.Task) error
 }
 
+// Telegram delivers daily digests (implemented by internal/telegram).
+type Telegram interface {
+	Configured() bool
+	Send(ctx context.Context, text string) error
+}
+
 // ChatDeps wires the harness to the rest of the app.
 type ChatDeps struct {
 	Cfg        *config.Config
@@ -45,6 +52,7 @@ type ChatDeps struct {
 	Tools      *tools.Registry
 	Memory     memory.Memory
 	Syncer     Syncer
+	Telegram   Telegram
 	Build      func(cfg config.Config, name string) (llm.Provider, error)
 }
 
@@ -130,22 +138,24 @@ type statePicker struct {
 }
 
 type chatModel struct {
-	deps        ChatDeps
-	ta          textarea.Model
-	vp          viewport.Model
-	width       int
-	height      int
-	ready       bool
-	entries     []entry
-	suggestions []suggestion
-	selected    int
-	thinking    bool
-	quitArmed   bool            // first ctrl+c clears; second quits
-	confirm     *pendingConfirm // non-nil while awaiting y/n
-	statePick   *statePicker    // non-nil while picking a Plane state
-	history     []string        // submitted inputs, for ↑/↓ recall
-	histPos     int             // -1 = not navigating
-	convID      int64           // 0 = unsaved
+	deps         ChatDeps
+	ta           textarea.Model
+	vp           viewport.Model
+	width        int
+	height       int
+	ready        bool
+	entries      []entry
+	suggestions  []suggestion
+	selected     int
+	thinking     bool
+	quitArmed    bool            // first ctrl+c clears; second quits
+	confirm      *pendingConfirm // non-nil while awaiting y/n
+	statePick    *statePicker    // non-nil while picking a Plane state
+	dailyDraft   string          // last generated/edited daily digest
+	dailyEditing bool            // true while editing the daily in the textarea
+	history      []string        // submitted inputs, for ↑/↓ recall
+	histPos      int             // -1 = not navigating
+	convID       int64           // 0 = unsaved
 }
 
 type replyMsg struct {
@@ -239,6 +249,30 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.layout()
 		return m, nil
+	}
+
+	// Editing the daily draft in the textarea: enter commits (does NOT send),
+	// esc discards. Other keys edit the text (alt+enter for newlines).
+	if m.dailyEditing {
+		switch msg.String() {
+		case "enter":
+			m.dailyDraft = strings.TrimRight(m.ta.Value(), " \n\t")
+			m.dailyEditing = false
+			m.ta.Reset()
+			m.add("sys", "daily updated. use /daily send to deliver it.")
+			m.layout()
+			return m, nil
+		case "esc":
+			m.dailyEditing = false
+			m.ta.Reset()
+			m.add("sys", "daily edit cancelled (draft kept).")
+			m.layout()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.ta, cmd = m.ta.Update(msg)
+		m.layout()
+		return m, cmd
 	}
 
 	// Suggestion menu open: navigate / complete / submit-if-complete.
@@ -424,6 +458,7 @@ var baseCommands = []suggestion{
 	{"/remember", "/remember <note> — save to long-term memory"},
 	{"/sync", "push local tasks to Plane"},
 	{"/pull", "pull states from Plane"},
+	{"/daily", "/daily [edit|send] — build/edit/send today's digest to Telegram"},
 	{"/clear", "clear the conversation"},
 	{"/quit", "exit"},
 }
@@ -613,6 +648,16 @@ func (m *chatModel) runCommand(val string) tea.Cmd {
 			m.add("sys", fmt.Sprintf("pulled states: %d task(s) updated", n))
 		}
 
+	case "/daily":
+		switch {
+		case len(fields) > 1 && fields[1] == "edit":
+			m.editDaily()
+		case len(fields) > 1 && fields[1] == "send":
+			m.sendDaily(ctx)
+		default:
+			m.generateDaily(ctx)
+		}
+
 	default:
 		m.add("err", "unknown command: "+fields[0]+" (try /help)")
 	}
@@ -733,6 +778,91 @@ func (m *chatModel) dropTask(ctx context.Context, id int64, withSync bool) {
 	}
 	out, err := m.deps.Tools.Dispatch(ctx, "drop_task", fmt.Sprintf(`{"id":%d}`, id))
 	m.report("dropped: ", out, err)
+}
+
+// generateDaily builds the digest from today's activity, stores it as the draft,
+// and shows it (copyable from the terminal).
+func (m *chatModel) generateDaily(ctx context.Context) {
+	tasks, err := m.deps.Store.List(ctx, store.Filter{TouchedToday: true})
+	if err != nil {
+		m.add("err", err.Error())
+		return
+	}
+	m.dailyDraft = buildDaily(tasks)
+	m.add("raw", m.dailyDraft)
+	m.add("sys", "daily draft ready — /daily edit to tweak, /daily send to deliver.")
+}
+
+// editDaily loads the current draft into the textarea for inline editing.
+func (m *chatModel) editDaily() {
+	if strings.TrimSpace(m.dailyDraft) == "" {
+		m.add("err", "no daily yet — run /daily first")
+		return
+	}
+	m.ta.SetValue(m.dailyDraft)
+	m.dailyEditing = true
+	m.suggestions = nil
+	m.layout()
+}
+
+// sendDaily delivers the draft to Telegram, degrading with a clear warning when
+// the integration is not configured.
+func (m *chatModel) sendDaily(ctx context.Context) {
+	if strings.TrimSpace(m.dailyDraft) == "" {
+		m.add("err", "no daily to send — run /daily first")
+		return
+	}
+	if m.deps.Telegram == nil || !m.deps.Telegram.Configured() {
+		m.add("err", "can't send: Telegram not configured (set bot token + chat id in config)")
+		return
+	}
+	if err := m.deps.Telegram.Send(ctx, m.dailyDraft); err != nil {
+		m.add("err", err.Error())
+		return
+	}
+	m.add("sys", "daily sent to Telegram ✓")
+}
+
+// buildDaily renders today's touched tasks as a markdown digest, grouped by
+// status in workflow order.
+func buildDaily(tasks []domain.Task) string {
+	var b strings.Builder
+	b.WriteString("# Daily — " + time.Now().Format("2006-01-02") + "\n")
+	if len(tasks) == 0 {
+		b.WriteString("\n_Sin actividad registrada hoy._")
+		return b.String()
+	}
+	order := []struct {
+		status domain.Status
+		label  string
+	}{
+		{domain.StatusInProgress, "En progreso"},
+		{domain.StatusDone, "Hecho"},
+		{domain.StatusBlocked, "Bloqueadas"},
+		{domain.StatusRejected, "Devueltas por Calidad"},
+		{domain.StatusTodo, "Por hacer"},
+		{domain.StatusPostponed, "Pospuestas"},
+		{domain.StatusBacklog, "Backlog"},
+		{domain.StatusCancelled, "Canceladas"},
+	}
+	for _, grp := range order {
+		var lines []string
+		for _, t := range tasks {
+			if t.Status != grp.status {
+				continue
+			}
+			code := ""
+			if t.WorkItemSeq > 0 {
+				code = fmt.Sprintf("#%d ", t.WorkItemSeq)
+			}
+			lines = append(lines, fmt.Sprintf("- [%s] %s%s", t.Type, code, t.Title))
+		}
+		if len(lines) > 0 {
+			b.WriteString("\n## " + grp.label + "\n")
+			b.WriteString(strings.Join(lines, "\n") + "\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // syncAll pushes every local task to Plane, reporting failures individually.
@@ -1261,6 +1391,9 @@ func (m *chatModel) View() string {
 func (m *chatModel) footer() string {
 	if m.confirm != nil {
 		return confirmStyle.Width(m.width).Render("⚠ " + m.confirm.prompt + "    y = confirm · n/esc = cancel")
+	}
+	if m.dailyEditing {
+		return thinkStyle.Render("editing daily · enter = save draft · alt+enter = newline · esc = cancel")
 	}
 	if m.quitArmed {
 		return thinkStyle.Render("press ctrl+c again to quit")
