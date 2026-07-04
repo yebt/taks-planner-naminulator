@@ -8,11 +8,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -57,11 +59,11 @@ type ChatDeps struct {
 	Build      func(cfg config.Config, name string) (llm.Provider, error)
 }
 
-// RunChat starts the interactive harness. Mouse capture starts OFF so the
-// terminal's native text selection works; ctrl+t toggles wheel-scroll mode.
+// RunChat starts the interactive harness. Mouse is captured for wheel scroll
+// and click-drag selection (which copies to the clipboard on release).
 func RunChat(deps ChatDeps) error {
 	m := newChatModel(deps)
-	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	return err
 }
 
@@ -111,6 +113,8 @@ var (
 	thinkStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
 	confirmStyle = lipgloss.NewStyle().Bold(true).
 			Foreground(lipgloss.Color("231")).Background(lipgloss.Color("160")).Padding(0, 1)
+	toastStyle = lipgloss.NewStyle().Bold(true).
+			Foreground(lipgloss.Color("231")).Background(lipgloss.Color("28")).Padding(0, 1)
 	toolStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("108"))
 	dividerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	userBubbleBG = lipgloss.Color("236")
@@ -156,10 +160,17 @@ type chatModel struct {
 	dailyDraft     string          // last generated/edited daily digest
 	dailyDraftDate string          // YYYY-MM-DD the current draft belongs to
 	dailyEditing   bool            // true while editing the daily in the textarea
-	mouseOn        bool            // wheel-scroll capture (off = native text selection)
 	history        []string        // submitted inputs, for ↑/↓ recall
 	histPos        int             // -1 = not navigating
 	convID         int64           // 0 = unsaved
+
+	// mouse selection (anchored in content-line coords so it survives scroll)
+	selecting    bool
+	selActive    bool
+	selStart     int
+	selEnd       int
+	contentLines []string // plain (ANSI-stripped) conversation lines
+	toast        string   // transient status (e.g. "copied N chars")
 }
 
 type replyMsg struct {
@@ -221,9 +232,21 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tea.MouseMsg:
-		var cmd tea.Cmd
-		m.vp, cmd = m.vp.Update(msg)
-		return m, cmd
+		return m.handleMouse(msg)
+
+	case copiedMsg:
+		m.selActive = false
+		if msg.err != nil {
+			m.toast = "clipboard error: " + msg.err.Error()
+		} else {
+			m.toast = fmt.Sprintf("copied %d chars ✓", msg.n)
+		}
+		m.setContent()
+		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return clearToastMsg{} })
+
+	case clearToastMsg:
+		m.toast = ""
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -243,17 +266,9 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.quitArmed = false // any other key disarms
-
-	// ctrl+t toggles mouse capture: off lets the terminal select/copy text,
-	// on enables wheel scrolling of the conversation.
-	if msg.String() == "ctrl+t" {
-		m.mouseOn = !m.mouseOn
-		if m.mouseOn {
-			m.add("sys", "mouse ON — wheel scroll (text selection disabled)")
-			return m, tea.EnableMouseCellMotion
-		}
-		m.add("sys", "mouse OFF — select text to copy (scroll with pgup/pgdn)")
-		return m, tea.DisableMouse
+	if m.selActive {    // any key clears a lingering selection highlight
+		m.selActive = false
+		m.setContent()
 	}
 
 	// Awaiting a y/n confirmation: swallow every other key until decided.
@@ -373,6 +388,109 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.layout()
 	return m, cmd
 }
+
+// --- mouse selection & clipboard ---
+
+type copiedMsg struct {
+	n   int
+	err error
+}
+type clearToastMsg struct{}
+
+func copyCmd(text string) tea.Cmd {
+	return func() tea.Msg {
+		err := clipboard.WriteAll(text)
+		return copiedMsg{n: len([]rune(text)), err: err}
+	}
+}
+
+// handleMouse forwards wheel events to the viewport and turns left click-drag
+// into a line selection that copies to the clipboard on release. The selection
+// is anchored in content-line coordinates, so scrolling mid-drag preserves it.
+func (m *chatModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch msg.Button {
+	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown, tea.MouseButtonWheelLeft, tea.MouseButtonWheelRight:
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		if m.selecting {
+			m.selEnd = m.contentLineAt(msg.Y)
+			m.setContent()
+		}
+		return m, cmd
+	}
+	switch msg.Action {
+	case tea.MouseActionPress:
+		if msg.Button == tea.MouseButtonLeft {
+			m.selecting = true
+			m.selActive = true
+			m.selStart = m.contentLineAt(msg.Y)
+			m.selEnd = m.selStart
+			m.setContent()
+		}
+	case tea.MouseActionMotion:
+		if m.selecting {
+			m.selEnd = m.contentLineAt(msg.Y)
+			m.setContent()
+		}
+	case tea.MouseActionRelease:
+		if m.selecting {
+			m.selecting = false
+			m.selEnd = m.contentLineAt(msg.Y)
+			text := m.selectedText()
+			m.setContent()
+			if strings.TrimSpace(text) == "" {
+				m.selActive = false
+				m.setContent()
+				return m, nil
+			}
+			return m, copyCmd(text)
+		}
+	}
+	return m, nil
+}
+
+// contentLineAt maps a screen row to an absolute content-line index. The
+// viewport starts at screen row 1 (row 0 is the header).
+func (m *chatModel) contentLineAt(y int) int {
+	line := m.vp.YOffset + (y - 1)
+	if line < 0 {
+		line = 0
+	}
+	if n := m.vp.TotalLineCount(); n > 0 && line > n-1 {
+		line = n - 1
+	}
+	return line
+}
+
+func (m *chatModel) selRange() (int, int) {
+	a, b := m.selStart, m.selEnd
+	if a > b {
+		a, b = b, a
+	}
+	n := len(m.contentLines)
+	if a < 0 {
+		a = 0
+	}
+	if b > n-1 {
+		b = n - 1
+	}
+	return a, b
+}
+
+func (m *chatModel) selectedText() string {
+	if len(m.contentLines) == 0 {
+		return ""
+	}
+	a, b := m.selRange()
+	if a > b || a < 0 {
+		return ""
+	}
+	return strings.Join(m.contentLines[a:b+1], "\n")
+}
+
+var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func ansiStrip(s string) string { return ansiRe.ReplaceAllString(s, "") }
 
 func (m *chatModel) submit() (tea.Model, tea.Cmd) {
 	val := strings.TrimRight(m.ta.Value(), " \n\t")
@@ -1565,7 +1683,20 @@ func (m *chatModel) setContent() {
 			blocks = append(blocks, body.Inherit(sysStyle).Render(e.text))
 		}
 	}
-	m.vp.SetContent(strings.Join(blocks, "\n\n"))
+	content := strings.Join(blocks, "\n\n")
+	styled := strings.Split(content, "\n")
+	m.contentLines = strings.Split(ansiStrip(content), "\n") // same line count
+
+	if m.selActive && len(styled) > 0 {
+		a, b := m.selRange()
+		sel := lipgloss.NewStyle().Reverse(true).Width(w)
+		for i := a; i <= b && i < len(styled); i++ {
+			styled[i] = sel.Render(m.contentLines[i])
+		}
+		m.vp.SetContent(strings.Join(styled, "\n"))
+		return
+	}
+	m.vp.SetContent(content)
 }
 
 func (m *chatModel) layout() {
@@ -1621,6 +1752,9 @@ func (m *chatModel) View() string {
 }
 
 func (m *chatModel) footer() string {
+	if m.toast != "" {
+		return toastStyle.Width(m.width).Render(m.toast)
+	}
 	if m.confirm != nil {
 		return confirmStyle.Width(m.width).Render("⚠ " + m.confirm.prompt + "    y = confirm · n/esc = cancel")
 	}
@@ -1633,7 +1767,7 @@ func (m *chatModel) footer() string {
 	if m.thinking {
 		return thinkStyle.Render("⏳ thinking…")
 	}
-	return helpStyle.Render("enter send · alt+enter newline · ↑/↓ history · pgup/pgdn scroll · ctrl+t mouse/select · / commands · ctrl+c quit")
+	return helpStyle.Render("enter send · alt+enter newline · ↑/↓ history · pgup/pgdn/wheel scroll · drag=select+copy · / commands · ctrl+c quit")
 }
 
 func (m *chatModel) statusBar() string {
