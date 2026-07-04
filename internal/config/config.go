@@ -19,8 +19,42 @@ type PlaneConfig struct {
 	APIToken        string            `json:"api_token,omitempty"`
 	WorkspaceSlug   string            `json:"workspace_slug,omitempty"`
 	ProjectID       string            `json:"project_id,omitempty"`
-	StateDefaults   map[string]string `json:"state_defaults,omitempty"`   // group -> default state name
+	States          []PlaneState      `json:"states,omitempty"`           // cached from the API (planner config → Plane → fetch)
+	StateDefaults   map[string]string `json:"state_defaults,omitempty"`   // group -> chosen state id (used when pushing)
 	DefaultEstimate string            `json:"default_estimate,omitempty"` // estimate_point sent on new work items; empty = don't set
+}
+
+// PlaneState is a cached Plane workflow state (id/name/group).
+type PlaneState struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Group string `json:"group"`
+}
+
+// TelegramConfig holds the Telegram bot settings for daily digests.
+type TelegramConfig struct {
+	BotToken string `json:"bot_token,omitempty"`
+	ChatID   string `json:"chat_id,omitempty"`
+	ThreadID string `json:"thread_id,omitempty"` // optional forum topic id
+}
+
+// Ready reports whether Plane has every field needed to sync.
+func (p PlaneConfig) Ready() bool {
+	return p.BaseURL != "" && p.APIToken != "" && p.WorkspaceSlug != "" && p.ProjectID != ""
+}
+
+// Ready reports whether Telegram can send messages.
+func (t TelegramConfig) Ready() bool { return t.BotToken != "" && t.ChatID != "" }
+
+// StatesByGroup returns the cached states belonging to a Plane group.
+func (p PlaneConfig) StatesByGroup(group string) []PlaneState {
+	var out []PlaneState
+	for _, s := range p.States {
+		if s.Group == group {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // Favorite is a saved provider+model combo the user can re-select later (e.g.
@@ -47,7 +81,21 @@ type Config struct {
 	DBPath         string                        `json:"db_path"`
 	ContextBudget  int                           `json:"context_budget"` // chars kept in the LLM window
 	Plane          PlaneConfig                   `json:"plane"`
+	Telegram       TelegramConfig                `json:"telegram"`
 	Memory         MemoryConfig                  `json:"memory"`
+}
+
+// ProvidersReady reports whether the active provider is usable (custom/local
+// providers need only a base url; the rest need an API key).
+func (c Config) ProvidersReady() bool {
+	pc, ok := c.Providers[c.ActiveProvider]
+	if !ok {
+		return false
+	}
+	if pc.Kind == "custom" {
+		return pc.BaseURL != ""
+	}
+	return pc.APIKey != ""
 }
 
 // DefaultContextBudget is the default LLM context window budget in characters.

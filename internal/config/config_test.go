@@ -39,6 +39,29 @@ func TestLoadMissingReturnsDefault(t *testing.T) {
 	}
 }
 
+func TestPlaneReadinessAndGroups(t *testing.T) {
+	var p PlaneConfig
+	if p.Ready() {
+		t.Fatal("empty plane config should not be ready")
+	}
+	p = PlaneConfig{BaseURL: "u", APIToken: "t", WorkspaceSlug: "w", ProjectID: "p"}
+	if !p.Ready() {
+		t.Fatal("fully-filled plane config should be ready")
+	}
+	p.States = []PlaneState{
+		{ID: "a", Name: "Por hacer", Group: "unstarted"},
+		{ID: "b", Name: "En progreso", Group: "started"},
+		{ID: "c", Name: "Devuelto por Calidad", Group: "completed"},
+		{ID: "d", Name: "Hecho", Group: "completed"},
+	}
+	if got := p.StatesByGroup("completed"); len(got) != 2 {
+		t.Fatalf("expected 2 completed states, got %d", len(got))
+	}
+	if got := p.StatesByGroup("started"); len(got) != 1 || got[0].ID != "b" {
+		t.Fatalf("started group lookup failed: %+v", got)
+	}
+}
+
 func TestSaveLoadRoundtrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	in := Default()

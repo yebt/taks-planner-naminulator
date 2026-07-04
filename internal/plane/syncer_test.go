@@ -100,6 +100,41 @@ func TestSyncerPushSetsLabelAndPriority(t *testing.T) {
 	}
 }
 
+func TestSyncerPushMapsStatusToGroupDefault(t *testing.T) {
+	var createBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/labels/"):
+			w.Write([]byte(`{"results":[]}`))
+		case r.Method == http.MethodGet:
+			w.Write([]byte(`{"results":[]}`))
+		case r.Method == http.MethodPost:
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &createBody)
+			w.Write([]byte(`{"id":"wi-1","sequence_id":1}`))
+		default:
+			w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+
+	st, _ := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	defer st.Close()
+	// in_progress → group "started"; the configured default for that group wins.
+	created, _ := st.Create(context.Background(), domain.Task{
+		Label: "feat-x", Type: domain.TypeFeat, Title: "X", Status: domain.StatusInProgress,
+	})
+
+	defaults := map[string]string{"started": "state-started-id"}
+	sy := NewSyncer(testClient(srv.URL), st, defaults)
+	if err := sy.Push(context.Background(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if createBody["state"] != "state-started-id" {
+		t.Fatalf("status did not map to the group default state: %v", createBody["state"])
+	}
+}
+
 func TestSyncerNotConfigured(t *testing.T) {
 	sy := NewSyncer(New(Config{BaseURL: "x"}), nil, nil) // missing token/slug/project
 	if sy.Configured() {

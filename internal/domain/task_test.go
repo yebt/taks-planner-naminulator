@@ -20,6 +20,24 @@ func TestDisplayTitle(t *testing.T) {
 	}
 }
 
+func TestPlaneGroup(t *testing.T) {
+	cases := map[Status]string{
+		StatusBacklog:    "backlog",
+		StatusPostponed:  "backlog",
+		StatusTodo:       "unstarted",
+		StatusInProgress: "started",
+		StatusBlocked:    "started",
+		StatusDone:       "completed",
+		StatusRejected:   "completed",
+		StatusCancelled:  "cancelled",
+	}
+	for s, want := range cases {
+		if got := s.PlaneGroup(); got != want {
+			t.Errorf("%s.PlaneGroup() = %q, want %q", s, got, want)
+		}
+	}
+}
+
 func TestRenderHTML(t *testing.T) {
 	task := Task{
 		Type:        TypeFeat,

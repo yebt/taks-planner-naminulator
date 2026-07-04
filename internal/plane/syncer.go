@@ -98,10 +98,25 @@ func (s *Syncer) issueInput(ctx context.Context, t *domain.Task) IssueInput {
 	if id := s.labelIDForType(ctx, t.Type); id != "" {
 		in.Labels = []string{id} // tag with the label matching the task type
 	}
-	if t.State != "" {
-		in.StateID = s.stateIDByName(ctx, t.State)
-	}
+	in.StateID = s.resolveStateID(ctx, t)
 	return in
+}
+
+// resolveStateID decides which Plane state a task lands on: an explicit state
+// name (set via /state) wins; otherwise the task's semantic status maps to a
+// group and we use the configured default state id for that group.
+func (s *Syncer) resolveStateID(ctx context.Context, t *domain.Task) string {
+	if t.State != "" {
+		if id := s.stateIDByName(ctx, t.State); id != "" {
+			return id
+		}
+	}
+	if s.stateDefaults != nil {
+		if id := s.stateDefaults[t.Status.PlaneGroup()]; id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 // Push creates (or updates) the work item for t and persists work_item_id and

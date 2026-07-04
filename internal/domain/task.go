@@ -44,6 +44,26 @@ const (
 	StatusCancelled  Status = "cancelled"
 )
 
+// PlaneGroup maps our semantic status to one of Plane's five fixed state
+// groups. The concrete state within the group is chosen from the project's
+// configured defaults (StateDefaults), since state names vary per instance.
+func (s Status) PlaneGroup() string {
+	switch s {
+	case StatusBacklog, StatusPostponed:
+		return "backlog"
+	case StatusTodo:
+		return "unstarted"
+	case StatusInProgress, StatusBlocked:
+		return "started"
+	case StatusDone, StatusRejected:
+		return "completed"
+	case StatusCancelled:
+		return "cancelled"
+	default:
+		return "unstarted"
+	}
+}
+
 // Valid reports whether the status is known.
 func (s Status) Valid() bool {
 	switch s {

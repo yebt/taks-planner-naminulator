@@ -99,6 +99,8 @@ var (
 	selStyle  = lipgloss.NewStyle().Bold(true).
 			Foreground(lipgloss.Color("231")).Background(lipgloss.Color("62"))
 	thinkStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	confirmStyle = lipgloss.NewStyle().Bold(true).
+			Foreground(lipgloss.Color("231")).Background(lipgloss.Color("160")).Padding(0, 1)
 	toolStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("108"))
 	dividerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	userBubbleBG = lipgloss.Color("236")
@@ -120,6 +122,13 @@ type pendingConfirm struct {
 	action func()
 }
 
+// statePicker is the active "/state <id>" selection: the menu lists the real
+// Plane states and enter applies the highlighted one to the task.
+type statePicker struct {
+	taskID int64
+	states []config.PlaneState
+}
+
 type chatModel struct {
 	deps        ChatDeps
 	ta          textarea.Model
@@ -133,6 +142,7 @@ type chatModel struct {
 	thinking    bool
 	quitArmed   bool            // first ctrl+c clears; second quits
 	confirm     *pendingConfirm // non-nil while awaiting y/n
+	statePick   *statePicker    // non-nil while picking a Plane state
 	history     []string        // submitted inputs, for ↑/↓ recall
 	histPos     int             // -1 = not navigating
 	convID      int64           // 0 = unsaved
@@ -203,6 +213,28 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			act()
 		case "n", "N", "esc":
 			m.confirm = nil
+			m.add("sys", "cancelled.")
+		}
+		m.layout()
+		return m, nil
+	}
+
+	// Picking a Plane state: navigate the list, enter applies, esc cancels.
+	if m.statePick != nil {
+		switch msg.String() {
+		case "up", "ctrl+p":
+			if m.selected > 0 {
+				m.selected--
+			}
+		case "down", "ctrl+n":
+			if m.selected < len(m.suggestions)-1 {
+				m.selected++
+			}
+		case "enter":
+			m.applyStatePick()
+		case "esc":
+			m.statePick = nil
+			m.suggestions = nil
 			m.add("sys", "cancelled.")
 		}
 		m.layout()
@@ -379,6 +411,7 @@ var baseCommands = []suggestion{
 	{"/task", "/task <id> — show a task in full"},
 	{"/new", "/new <TYPE> <title> — create a task (no LLM)"},
 	{"/status", "/status <id> <status> — change a task status"},
+	{"/state", "/state <id> — pick a Plane state from the real list"},
 	{"/drop", "/drop <id> [sync] — delete a task (sync also removes it in Plane)"},
 	{"/model", "switch LLM provider"},
 	{"/fav", "/fav [save|del] <name> — save/switch a provider+model favorite"},
@@ -397,7 +430,7 @@ var baseCommands = []suggestion{
 
 var needsArg = map[string]bool{
 	"/new": true, "/status": true, "/model": true, "/key": true, "/fav": true,
-	"/load": true, "/recall": true, "/remember": true, "/task": true, "/drop": true,
+	"/load": true, "/recall": true, "/remember": true, "/task": true, "/drop": true, "/state": true,
 }
 
 func (m *chatModel) runCommand(val string) tea.Cmd {
@@ -456,6 +489,18 @@ func (m *chatModel) runCommand(val string) tea.Cmd {
 		out, err := m.deps.Tools.Dispatch(ctx, "set_status", args)
 		m.report("updated: ", out, err)
 
+	case "/state":
+		if len(fields) < 2 {
+			m.add("err", "usage: /state <id>")
+			break
+		}
+		id, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			m.add("err", "id must be a number")
+			break
+		}
+		m.openStatePicker(id)
+
 	case "/drop":
 		if len(fields) < 2 {
 			m.add("err", "usage: /drop <id> [sync]")
@@ -469,10 +514,9 @@ func (m *chatModel) runCommand(val string) tea.Cmd {
 		withSync := len(fields) > 2 && (fields[2] == "sync" || fields[2] == "--sync")
 		if withSync {
 			m.confirm = &pendingConfirm{
-				prompt: fmt.Sprintf("delete #%d locally AND in Plane? press y to confirm, n to cancel", id),
+				prompt: fmt.Sprintf("delete #%d locally and in Plane?", id),
 				action: func() { m.dropTask(context.Background(), id, true) },
 			}
-			m.add("sys", m.confirm.prompt)
 			break
 		}
 		m.dropTask(ctx, id, false)
@@ -638,6 +682,42 @@ func statusStyleFor(s domain.Status) lipgloss.Style {
 		c = "252"
 	}
 	return lipgloss.NewStyle().Foreground(c)
+}
+
+// openStatePicker shows a menu of the real Plane states (from the config cache)
+// so the user selects instead of guessing. Requires a prior fetch in config.
+func (m *chatModel) openStatePicker(id int64) {
+	states := m.deps.Cfg.Plane.States
+	if len(states) == 0 {
+		m.add("err", "no states cached — run: planner config → Plane → fetch states")
+		return
+	}
+	if _, err := m.deps.Store.Get(context.Background(), id); err != nil {
+		m.add("err", err.Error())
+		return
+	}
+	m.statePick = &statePicker{taskID: id, states: states}
+	m.suggestions = m.suggestions[:0]
+	for _, s := range states {
+		m.suggestions = append(m.suggestions, suggestion{full: s.Name, desc: "(" + s.Group + ")"})
+	}
+	m.selected = 0
+	m.layout()
+}
+
+// applyStatePick sets the highlighted Plane state on the task via set_state.
+func (m *chatModel) applyStatePick() {
+	sp := m.statePick
+	m.statePick = nil
+	if sp == nil || m.selected >= len(sp.states) {
+		m.suggestions = nil
+		return
+	}
+	name := sp.states[m.selected].Name
+	m.suggestions = nil
+	args := fmt.Sprintf(`{"id":%d,"state":%q}`, sp.taskID, name)
+	out, err := m.deps.Tools.Dispatch(context.Background(), "set_state", args)
+	m.report("state: ", out, err)
 }
 
 // dropTask deletes a task locally, and (when withSync) removes its Plane work
@@ -1179,6 +1259,9 @@ func (m *chatModel) View() string {
 }
 
 func (m *chatModel) footer() string {
+	if m.confirm != nil {
+		return confirmStyle.Width(m.width).Render("⚠ " + m.confirm.prompt + "    y = confirm · n/esc = cancel")
+	}
 	if m.quitArmed {
 		return thinkStyle.Render("press ctrl+c again to quit")
 	}
