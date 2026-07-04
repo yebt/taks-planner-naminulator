@@ -53,13 +53,15 @@ type ChatDeps struct {
 	Memory     memory.Memory
 	Syncer     Syncer
 	Telegram   Telegram
+	Dailies    store.DailyStore
 	Build      func(cfg config.Config, name string) (llm.Provider, error)
 }
 
-// RunChat starts the interactive harness.
+// RunChat starts the interactive harness. Mouse capture starts OFF so the
+// terminal's native text selection works; ctrl+t toggles wheel-scroll mode.
 func RunChat(deps ChatDeps) error {
 	m := newChatModel(deps)
-	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
+	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }
 
@@ -138,24 +140,26 @@ type statePicker struct {
 }
 
 type chatModel struct {
-	deps         ChatDeps
-	ta           textarea.Model
-	vp           viewport.Model
-	width        int
-	height       int
-	ready        bool
-	entries      []entry
-	suggestions  []suggestion
-	selected     int
-	thinking     bool
-	quitArmed    bool            // first ctrl+c clears; second quits
-	confirm      *pendingConfirm // non-nil while awaiting y/n
-	statePick    *statePicker    // non-nil while picking a Plane state
-	dailyDraft   string          // last generated/edited daily digest
-	dailyEditing bool            // true while editing the daily in the textarea
-	history      []string        // submitted inputs, for ↑/↓ recall
-	histPos      int             // -1 = not navigating
-	convID       int64           // 0 = unsaved
+	deps           ChatDeps
+	ta             textarea.Model
+	vp             viewport.Model
+	width          int
+	height         int
+	ready          bool
+	entries        []entry
+	suggestions    []suggestion
+	selected       int
+	thinking       bool
+	quitArmed      bool            // first ctrl+c clears; second quits
+	confirm        *pendingConfirm // non-nil while awaiting y/n
+	statePick      *statePicker    // non-nil while picking a Plane state
+	dailyDraft     string          // last generated/edited daily digest
+	dailyDraftDate string          // YYYY-MM-DD the current draft belongs to
+	dailyEditing   bool            // true while editing the daily in the textarea
+	mouseOn        bool            // wheel-scroll capture (off = native text selection)
+	history        []string        // submitted inputs, for ↑/↓ recall
+	histPos        int             // -1 = not navigating
+	convID         int64           // 0 = unsaved
 }
 
 type replyMsg struct {
@@ -166,6 +170,7 @@ type replyMsg struct {
 // dailyMsg carries the result of an async daily generation; fallback is the
 // deterministic digest used when the model call fails or returns nothing.
 type dailyMsg struct {
+	dateKey  string
 	text     string
 	fallback string
 	err      error
@@ -205,8 +210,10 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.dailyDraft = text
+		m.dailyDraftDate = msg.dateKey
+		m.persistDaily(msg.dateKey, text)
 		m.add("raw", m.dailyDraft)
-		m.add("sys", "daily draft ready — /daily edit to tweak, /daily send to deliver.")
+		m.add("sys", "daily ("+msg.dateKey+") ready — /daily edit to tweak, /daily send to deliver.")
 		m.layout()
 		return m, nil
 
@@ -236,6 +243,18 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.quitArmed = false // any other key disarms
+
+	// ctrl+t toggles mouse capture: off lets the terminal select/copy text,
+	// on enables wheel scrolling of the conversation.
+	if msg.String() == "ctrl+t" {
+		m.mouseOn = !m.mouseOn
+		if m.mouseOn {
+			m.add("sys", "mouse ON — wheel scroll (text selection disabled)")
+			return m, tea.EnableMouseCellMotion
+		}
+		m.add("sys", "mouse OFF — select text to copy (scroll with pgup/pgdn)")
+		return m, tea.DisableMouse
+	}
 
 	// Awaiting a y/n confirmation: swallow every other key until decided.
 	if m.confirm != nil {
@@ -282,6 +301,7 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.dailyDraft = strings.TrimRight(m.ta.Value(), " \n\t")
 			m.dailyEditing = false
 			m.ta.Reset()
+			m.persistDaily(m.dailyDraftDate, m.dailyDraft)
 			m.add("sys", "daily updated. use /daily send to deliver it.")
 			m.layout()
 			return m, nil
@@ -481,7 +501,9 @@ var baseCommands = []suggestion{
 	{"/remember", "/remember <note> — save to long-term memory"},
 	{"/sync", "push local tasks to Plane"},
 	{"/pull", "pull states from Plane"},
-	{"/daily", "/daily [edit|send] — build/edit/send today's digest to Telegram"},
+	{"/daily", "/daily [date] [instr] · edit|send [date] — build/edit/send a digest"},
+	{"/dailies", "list stored dailies"},
+	{"/resume", "resume the most recent conversation"},
 	{"/clear", "clear the conversation"},
 	{"/quit", "exit"},
 }
@@ -672,14 +694,13 @@ func (m *chatModel) runCommand(val string) tea.Cmd {
 		}
 
 	case "/daily":
-		switch {
-		case len(fields) > 1 && fields[1] == "edit":
-			m.editDaily()
-		case len(fields) > 1 && fields[1] == "send":
-			m.sendDaily(ctx)
-		default:
-			return m.generateDailyCmd(ctx)
-		}
+		return m.handleDaily(ctx, fields)
+
+	case "/dailies":
+		m.listDailies(ctx)
+
+	case "/resume":
+		m.resumeLast(ctx)
 
 	default:
 		m.add("err", "unknown command: "+fields[0]+" (try /help)")
@@ -828,30 +849,87 @@ Reglas:
 - Prefijos exactos: "  + ", "  # ", "  >> ".
 - Si una sección no tiene contenido, omitila por completo (incluyendo su título).`
 
-// generateDailyCmd gathers today's tasks and asks the model to draft the daily
-// asynchronously; the deterministic buildDaily is passed as a fallback.
-func (m *chatModel) generateDailyCmd(ctx context.Context) tea.Cmd {
-	tasks, err := m.deps.Store.List(ctx, store.Filter{TouchedToday: true})
+// handleDaily routes the /daily verbs: "edit"/"send" (optional date), otherwise
+// the first token is an optional date and the rest an optional LLM instruction.
+func (m *chatModel) handleDaily(ctx context.Context, fields []string) tea.Cmd {
+	if len(fields) == 1 {
+		return m.generateDailyCmd(ctx, time.Now(), "")
+	}
+	switch fields[1] {
+	case "edit":
+		m.editDaily(ctx, dailyDayArg(fields[2:]))
+		return nil
+	case "send":
+		m.sendDaily(ctx, dailyDayArg(fields[2:]))
+		return nil
+	default:
+		day, ok := parseDay(fields[1])
+		if !ok {
+			m.add("err", "usage: /daily [today|yesterday|YYYY-MM-DD] [instruction] · /daily edit|send [date]")
+			return nil
+		}
+		return m.generateDailyCmd(ctx, day, strings.Join(fields[2:], " "))
+	}
+}
+
+// parseDay resolves today/yesterday (es/en) or an explicit YYYY-MM-DD date.
+func parseDay(tok string) (time.Time, bool) {
+	switch strings.ToLower(tok) {
+	case "today", "hoy":
+		return time.Now(), true
+	case "yesterday", "ayer":
+		return time.Now().AddDate(0, 0, -1), true
+	}
+	if t, err := time.Parse("2006-01-02", tok); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
+
+// dailyDayArg reads an optional date argument, defaulting to today.
+func dailyDayArg(rest []string) time.Time {
+	if len(rest) > 0 {
+		if d, ok := parseDay(rest[0]); ok {
+			return d
+		}
+	}
+	return time.Now()
+}
+
+// generateDailyCmd drafts the digest for a day asynchronously, feeding the model
+// the day's tasks, any previously stored/edited draft, and an optional
+// instruction so prior modifications are respected.
+func (m *chatModel) generateDailyCmd(ctx context.Context, day time.Time, instruction string) tea.Cmd {
+	tasks, err := m.deps.Store.List(ctx, store.Filter{Day: day})
 	if err != nil {
 		m.add("err", err.Error())
 		return nil
 	}
-	date := dailyDate(time.Now())
+	date := dailyDate(day)
+	dateKey := day.Format("2006-01-02")
+	prior := ""
+	if m.deps.Dailies != nil {
+		if d, err := m.deps.Dailies.GetDaily(ctx, dateKey); err == nil {
+			prior = d.Content
+		}
+	}
 	m.thinking = true
-	m.add("sys", "generating daily…")
+	m.add("sys", "generating daily for "+date+"…")
 	m.layout()
-	return dailyCmd(m.deps.Agent, serializeTasksForDaily(date, tasks), buildDaily(date, tasks))
+	userMsg := serializeTasksForDaily(date, tasks, prior, instruction)
+	return dailyCmd(m.deps.Agent, dateKey, userMsg, buildDaily(date, tasks))
 }
 
-func dailyCmd(a *agent.Agent, userMsg, fallback string) tea.Cmd {
+func dailyCmd(a *agent.Agent, dateKey, userMsg, fallback string) tea.Cmd {
 	return func() tea.Msg {
 		out, err := a.Oneshot(context.Background(), dailyPrompt, userMsg)
-		return dailyMsg{text: out, fallback: fallback, err: err}
+		return dailyMsg{dateKey: dateKey, text: out, fallback: fallback, err: err}
 	}
 }
 
-// serializeTasksForDaily renders the day's tasks as material for the model.
-func serializeTasksForDaily(date string, tasks []domain.Task) string {
+// serializeTasksForDaily renders the day's tasks, the prior draft, and any edit
+// request as material for the model.
+func serializeTasksForDaily(date string, tasks []domain.Task, prior, instruction string) string {
 	var b strings.Builder
 	b.WriteString("FECHA: " + date + "\n\nTareas del día:\n")
 	if len(tasks) == 0 {
@@ -867,6 +945,12 @@ func serializeTasksForDaily(date string, tasks []domain.Task) string {
 		}
 		b.WriteString("\n")
 	}
+	if strings.TrimSpace(prior) != "" {
+		b.WriteString("\nDaily previo (respetá las ediciones ya hechas salvo que se indique lo contrario):\n" + prior + "\n")
+	}
+	if strings.TrimSpace(instruction) != "" {
+		b.WriteString("\nModificación solicitada: " + instruction + "\n")
+	}
 	return b.String()
 }
 
@@ -876,34 +960,101 @@ func dailyDate(t time.Time) string {
 	return t.Format("2006-01-02") + " " + months[int(t.Month())-1]
 }
 
-// editDaily loads the current draft into the textarea for inline editing.
-func (m *chatModel) editDaily() {
-	if strings.TrimSpace(m.dailyDraft) == "" {
-		m.add("err", "no daily yet — run /daily first")
+// draftFor returns the current in-memory draft for dateKey, or the stored one.
+func (m *chatModel) draftFor(ctx context.Context, dateKey string) string {
+	if dateKey == m.dailyDraftDate && strings.TrimSpace(m.dailyDraft) != "" {
+		return m.dailyDraft
+	}
+	if m.deps.Dailies != nil {
+		if d, err := m.deps.Dailies.GetDaily(ctx, dateKey); err == nil {
+			return d.Content
+		}
+	}
+	return ""
+}
+
+func (m *chatModel) persistDaily(dateKey, content string) {
+	if m.deps.Dailies != nil && strings.TrimSpace(content) != "" {
+		_ = m.deps.Dailies.SaveDaily(context.Background(), dateKey, content)
+	}
+}
+
+// editDaily loads a date's draft into the textarea for inline editing.
+func (m *chatModel) editDaily(ctx context.Context, day time.Time) {
+	dateKey := day.Format("2006-01-02")
+	draft := m.draftFor(ctx, dateKey)
+	if strings.TrimSpace(draft) == "" {
+		m.add("err", "no daily for "+dateKey+" — run /daily "+dateKey+" first")
 		return
 	}
-	m.ta.SetValue(m.dailyDraft)
+	m.dailyDraft = draft
+	m.dailyDraftDate = dateKey
+	m.ta.SetValue(draft)
 	m.dailyEditing = true
 	m.suggestions = nil
 	m.layout()
 }
 
-// sendDaily delivers the draft to Telegram, degrading with a clear warning when
-// the integration is not configured.
-func (m *chatModel) sendDaily(ctx context.Context) {
-	if strings.TrimSpace(m.dailyDraft) == "" {
-		m.add("err", "no daily to send — run /daily first")
+// sendDaily delivers a date's draft to Telegram, degrading with a clear warning
+// when the integration is not configured.
+func (m *chatModel) sendDaily(ctx context.Context, day time.Time) {
+	dateKey := day.Format("2006-01-02")
+	content := m.draftFor(ctx, dateKey)
+	if strings.TrimSpace(content) == "" {
+		m.add("err", "no daily for "+dateKey+" — run /daily "+dateKey+" first")
 		return
 	}
 	if m.deps.Telegram == nil || !m.deps.Telegram.Configured() {
 		m.add("err", "can't send: Telegram not configured (set bot token + chat id in config)")
 		return
 	}
-	if err := m.deps.Telegram.Send(ctx, m.dailyDraft); err != nil {
+	if err := m.deps.Telegram.Send(ctx, content); err != nil {
 		m.add("err", err.Error())
 		return
 	}
-	m.add("sys", "daily sent to Telegram ✓")
+	m.add("sys", "daily "+dateKey+" sent to Telegram ✓")
+}
+
+// listDailies shows the stored digests.
+func (m *chatModel) listDailies(ctx context.Context) {
+	if m.deps.Dailies == nil {
+		m.add("err", "daily store not available")
+		return
+	}
+	ds, err := m.deps.Dailies.ListDailies(ctx)
+	if err != nil {
+		m.add("err", err.Error())
+		return
+	}
+	if len(ds) == 0 {
+		m.add("sys", "no dailies stored yet. run /daily")
+		return
+	}
+	var b strings.Builder
+	b.WriteString(botLabel.Render(fmt.Sprintf("dailies · %d", len(ds))) + "\n\n")
+	for _, d := range ds {
+		b.WriteString(fmt.Sprintf("  %s   %s\n", d.Date, helpStyle.Render(d.UpdatedAt.Local().Format("15:04"))))
+	}
+	b.WriteString("\n" + helpStyle.Render("/daily <date> regenerate · /daily edit <date> · /daily send <date>"))
+	m.add("raw", strings.TrimRight(b.String(), "\n"))
+}
+
+// resumeLast loads the most recently updated conversation.
+func (m *chatModel) resumeLast(ctx context.Context) {
+	if m.deps.Convos == nil {
+		m.add("err", "conversation store not available")
+		return
+	}
+	convs, err := m.deps.Convos.ListConversations(ctx)
+	if err != nil {
+		m.add("err", err.Error())
+		return
+	}
+	if len(convs) == 0 {
+		m.add("sys", "no saved conversations yet.")
+		return
+	}
+	m.loadConversation(ctx, strconv.FormatInt(convs[0].ID, 10))
 }
 
 // buildDaily is the deterministic fallback digest (used when the LLM call
@@ -1482,7 +1633,7 @@ func (m *chatModel) footer() string {
 	if m.thinking {
 		return thinkStyle.Render("⏳ thinking…")
 	}
-	return helpStyle.Render("enter send · alt+enter newline · ↑/↓ history · pgup/pgdn/wheel scroll · / commands · ctrl+c quit")
+	return helpStyle.Render("enter send · alt+enter newline · ↑/↓ history · pgup/pgdn scroll · ctrl+t mouse/select · / commands · ctrl+c quit")
 }
 
 func (m *chatModel) statusBar() string {

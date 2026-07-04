@@ -141,6 +141,7 @@ func runChat() error {
 		Memory:     mem,
 		Syncer:     syncer,
 		Telegram:   tg,
+		Dailies:    st,
 		Build:      buildProvider,
 	})
 }

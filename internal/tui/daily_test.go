@@ -35,6 +35,26 @@ func TestBuildDaily(t *testing.T) {
 	}
 }
 
+func TestParseDay(t *testing.T) {
+	if _, ok := parseDay("hoy"); !ok {
+		t.Fatal("hoy should parse")
+	}
+	y, ok := parseDay("ayer")
+	if !ok {
+		t.Fatal("ayer should parse")
+	}
+	if got := y.Format("2006-01-02"); got != time.Now().AddDate(0, 0, -1).Format("2006-01-02") {
+		t.Fatalf("ayer = %s", got)
+	}
+	d, ok := parseDay("2026-02-02")
+	if !ok || d.Format("2006-01-02") != "2026-02-02" {
+		t.Fatalf("explicit date parse failed: %v %v", d, ok)
+	}
+	if _, ok := parseDay("mañana-quizá"); ok {
+		t.Fatal("garbage should not parse")
+	}
+}
+
 func TestBuildDailyEmpty(t *testing.T) {
 	out := buildDaily("2026-02-02 FEB", nil)
 	if !strings.Contains(out, "sin actividad") {

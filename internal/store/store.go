@@ -3,6 +3,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/webcloster-dev/planner/internal/domain"
 	"github.com/webcloster-dev/planner/internal/llm"
@@ -12,6 +13,21 @@ import (
 type Filter struct {
 	Status       domain.Status // empty = any
 	TouchedToday bool          // only tasks interacted with today (for the daily)
+	Day          time.Time     // zero = any; else only tasks touched on this calendar day
+}
+
+// Daily is a stored daily digest for one calendar date.
+type Daily struct {
+	Date      string // YYYY-MM-DD
+	Content   string
+	UpdatedAt time.Time
+}
+
+// DailyStore persists daily digests so they can be listed, edited, and resent.
+type DailyStore interface {
+	SaveDaily(ctx context.Context, date, content string) error
+	GetDaily(ctx context.Context, date string) (Daily, error)
+	ListDailies(ctx context.Context) ([]Daily, error)
 }
 
 // TaskStore is the persistence port.

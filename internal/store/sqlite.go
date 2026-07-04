@@ -59,6 +59,11 @@ func (s *SQLite) migrate() error {
   title      TEXT    NOT NULL DEFAULT '',
   updated_at INTEGER NOT NULL
 );`,
+		`CREATE TABLE IF NOT EXISTS dailies (
+  date       TEXT    PRIMARY KEY,
+  content    TEXT    NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL
+);`,
 		`CREATE TABLE IF NOT EXISTS conv_messages (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   conversation_id INTEGER NOT NULL,
@@ -168,6 +173,11 @@ func (s *SQLite) List(ctx context.Context, f Filter) ([]domain.Task, error) {
 		conds = append(conds, "touched_at >= ?")
 		args = append(args, startOfToday().Unix())
 	}
+	if !f.Day.IsZero() {
+		start := time.Date(f.Day.Year(), f.Day.Month(), f.Day.Day(), 0, 0, 0, 0, f.Day.Location())
+		conds = append(conds, "touched_at >= ? AND touched_at < ?")
+		args = append(args, start.Unix(), start.AddDate(0, 0, 1).Unix())
+	}
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
@@ -225,6 +235,51 @@ func (s *SQLite) Delete(ctx context.Context, id int64) error {
 		return fmt.Errorf("%w: id=%d", ErrNotFound, id)
 	}
 	return nil
+}
+
+// SaveDaily upserts the digest for a date.
+func (s *SQLite) SaveDaily(ctx context.Context, date, content string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO dailies (date, content, updated_at) VALUES (?,?,?)
+		 ON CONFLICT(date) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
+		date, content, time.Now().Unix())
+	return err
+}
+
+// GetDaily returns the stored digest for a date (ErrNotFound if none).
+func (s *SQLite) GetDaily(ctx context.Context, date string) (Daily, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT date, content, updated_at FROM dailies WHERE date = ?`, date)
+	var d Daily
+	var updated int64
+	err := row.Scan(&d.Date, &d.Content, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Daily{}, fmt.Errorf("%w: daily %s", ErrNotFound, date)
+	}
+	if err != nil {
+		return Daily{}, err
+	}
+	d.UpdatedAt = time.Unix(updated, 0).UTC()
+	return d, nil
+}
+
+// ListDailies returns stored digests, most recent date first.
+func (s *SQLite) ListDailies(ctx context.Context) ([]Daily, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT date, content, updated_at FROM dailies ORDER BY date DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Daily
+	for rows.Next() {
+		var d Daily
+		var updated int64
+		if err := rows.Scan(&d.Date, &d.Content, &updated); err != nil {
+			return nil, err
+		}
+		d.UpdatedAt = time.Unix(updated, 0).UTC()
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
 
 // scanner is satisfied by *sql.Row and *sql.Rows.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/webcloster-dev/planner/internal/domain"
 )
@@ -145,6 +146,62 @@ func TestDatesRoundtrip(t *testing.T) {
 	}
 	if got.StartDate != "2026-06-01" || got.DueDate != "2026-06-02" {
 		t.Fatalf("dates not persisted: %q %q", got.StartDate, got.DueDate)
+	}
+}
+
+func TestDailyRoundtrip(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if err := s.SaveDaily(ctx, "2026-07-03", "Daily:  2026-07-03 JUL\n\nTrabajo:\n  + x"); err != nil {
+		t.Fatal(err)
+	}
+	// upsert overwrites content for the same date
+	if err := s.SaveDaily(ctx, "2026-07-03", "edited"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveDaily(ctx, "2026-07-04", "another"); err != nil {
+		t.Fatal(err)
+	}
+	d, err := s.GetDaily(ctx, "2026-07-03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Content != "edited" {
+		t.Fatalf("upsert did not overwrite: %q", d.Content)
+	}
+	list, err := s.ListDailies(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 || list[0].Date != "2026-07-04" { // most recent first
+		t.Fatalf("list order/size wrong: %+v", list)
+	}
+	if _, err := s.GetDaily(ctx, "1999-01-01"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestListFilterByDay(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	old, err := s.Create(ctx, domain.Task{Label: "a", Type: domain.TypeFeat, Title: "old", Status: domain.StatusTodo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Force this task's touched_at into the past by writing it directly.
+	past := time.Now().AddDate(0, 0, -3)
+	if _, err := s.db.Exec(`UPDATE tasks SET touched_at=? WHERE id=?`, past.Unix(), old.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Create(ctx, domain.Task{Label: "b", Type: domain.TypeFeat, Title: "today", Status: domain.StatusTodo}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.List(ctx, Filter{Day: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Title != "today" {
+		t.Fatalf("day filter should return only today's task: %+v", got)
 	}
 }
 
