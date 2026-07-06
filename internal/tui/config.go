@@ -36,16 +36,17 @@ type cfgSection struct {
 }
 
 type configModel struct {
-	cfg     *config.Config
-	path    string
-	section int // -1 = main menu
-	fields  []cfgField
-	cursor  int
-	editing bool
-	input   textinput.Model
-	status  string
-	width   int
-	height  int
+	cfg      *config.Config
+	path     string
+	section  int    // -1 = main menu
+	provider string // non-empty = drilled into this provider's detail (Providers section)
+	fields   []cfgField
+	cursor   int
+	editing  bool
+	input    textinput.Model
+	status   string
+	width    int
+	height   int
 }
 
 // RunConfig opens the sectioned configuration TUI. It mutates cfg in place and
@@ -70,6 +71,7 @@ func (m *configModel) enterSection(i int) {
 	m.section = i
 	m.cursor = 0
 	m.status = ""
+	m.provider = ""
 	switch i {
 	case 0:
 		m.fields = m.providerFields()
@@ -82,12 +84,10 @@ func (m *configModel) enterSection(i int) {
 
 // --- section field builders ---
 
+// providerFields is the Providers section list: general settings on top, then
+// one row per provider that drills into its detail (model / key / activate).
 func (m *configModel) providerFields() []cfgField {
-	names := m.providerNames()
 	fields := []cfgField{
-		{label: "active provider", choices: names,
-			get: func() string { return m.cfg.ActiveProvider },
-			set: func(v string) { m.cfg.ActiveProvider = strings.TrimSpace(v) }},
 		{label: "context budget (chars)",
 			get: func() string { return strconv.Itoa(m.cfg.ContextBudget) },
 			set: func(v string) {
@@ -99,18 +99,55 @@ func (m *configModel) providerFields() []cfgField {
 			get: func() string { return m.cfg.Memory.Project },
 			set: func(v string) { m.cfg.Memory.Project = strings.TrimSpace(v) }},
 	}
-	for _, name := range names {
+	for _, name := range m.providerNames() {
 		n := name // capture
-		fields = append(fields,
-			cfgField{label: n + " · model",
-				get: func() string { return m.cfg.Providers[n].Model },
-				set: func(v string) { pc := m.cfg.Providers[n]; pc.Model = strings.TrimSpace(v); m.cfg.Providers[n] = pc }},
-			cfgField{label: n + " · api key", secret: true,
-				get: func() string { return m.cfg.Providers[n].APIKey },
-				set: func(v string) { pc := m.cfg.Providers[n]; pc.APIKey = strings.TrimSpace(v); m.cfg.Providers[n] = pc }},
-		)
+		fields = append(fields, cfgField{
+			label: providerRowLabel(m.cfg, n),
+			action: func() string {
+				m.provider = n
+				m.fields = m.providerDetailFields(n)
+				m.cursor = 0
+				return ""
+			},
+		})
 	}
 	return fields
+}
+
+// providerDetailFields is the drill-in view for one provider.
+func (m *configModel) providerDetailFields(name string) []cfgField {
+	n := name
+	return []cfgField{
+		{label: "model",
+			get: func() string { return m.cfg.Providers[n].Model },
+			set: func(v string) { pc := m.cfg.Providers[n]; pc.Model = strings.TrimSpace(v); m.cfg.Providers[n] = pc }},
+		{label: "api key", secret: true,
+			get: func() string { return m.cfg.Providers[n].APIKey },
+			set: func(v string) { pc := m.cfg.Providers[n]; pc.APIKey = strings.TrimSpace(v); m.cfg.Providers[n] = pc }},
+		{label: "✓ set as active provider", action: func() string {
+			m.cfg.ActiveProvider = n
+			return n + " is now active — press s to save"
+		}},
+	}
+}
+
+// providerRowLabel shows the active marker (▸), a key marker (● set / ○ unset),
+// the name and the model.
+func providerRowLabel(cfg *config.Config, name string) string {
+	active := "  "
+	if cfg.ActiveProvider == name {
+		active = "▸ "
+	}
+	pc := cfg.Providers[name]
+	key := "○"
+	if pc.Kind == "custom" || pc.APIKey != "" {
+		key = "●"
+	}
+	model := pc.Model
+	if model == "" {
+		model = "—"
+	}
+	return fmt.Sprintf("%s%s %-9s · %s", active, key, name, model)
 }
 
 func (m *configModel) planeFields() []cfgField {
@@ -311,6 +348,13 @@ func (m *configModel) updateSection(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c", "q":
 		return m, tea.Quit
 	case "esc":
+		if m.section == 0 && m.provider != "" { // back from provider detail to the list
+			m.provider = ""
+			m.fields = m.providerFields()
+			m.cursor = 0
+			m.status = ""
+			return m, nil
+		}
 		m.section = -1
 		m.cursor = 0
 		m.status = ""
@@ -403,7 +447,11 @@ func (m *configModel) viewMenu() string {
 func (m *configModel) viewSection() string {
 	var b strings.Builder
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213"))
-	b.WriteString(title.Render(m.sections()[m.section].name) + "\n\n")
+	name := m.sections()[m.section].name
+	if m.section == 0 && m.provider != "" {
+		name = "Providers · " + m.provider
+	}
+	b.WriteString(title.Render(name) + "\n\n")
 	for i, f := range m.fields {
 		cursor := "  "
 		label := fmt.Sprintf("%-22s", f.label)

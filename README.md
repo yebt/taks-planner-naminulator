@@ -47,13 +47,16 @@ action (`↻`/`✈`). Secrets are masked.
 
 ### Providers
 
-- **active provider** — cycle to the LLM you want live.
-- **context budget** — characters kept in the LLM window.
-- **memory project** — Engram project (blank = autodetect).
-- per provider: **model** and **api key**.
+Two general settings on top — **context budget** (chars kept in the LLM window)
+and **memory project** (Engram project, blank = autodetect) — then a **list of
+providers**. Each row shows the active marker (`▸`), a key marker (`●` set /
+`○` unset), the name and the model.
+
+`enter` on a provider drills into it: set its **model**, paste its **api key**,
+and **✓ set as active provider**. `esc` goes back to the list.
 
 Built-in providers: `ollama` (local, default, free), `openai`, `moonshot`,
-`kimi`, `groq`, `claude`. Set the key for the one you use.
+`kimi`, `groq`, `claude`. Just configure the one you use and activate it.
 
 ### Plane
 
@@ -110,8 +113,9 @@ and any key (or `esc`) cancels it.
   flag filters, and an optional day flag narrows to that day
 - `/task <id>` — show one task in full (template sections, dates, priority)
 - `/new <TYPE> <title>` — create a task without the LLM
-- `/status <id> <status>` — change status (`todo`, `in_progress`, `blocked`,
-  `postponed`, `done`, `rejected`, `cancelled`, `backlog`)
+- `/status <id> <status>` — move a task between Plane's 5 state groups
+  (`backlog`, `unstarted`, `started`, `completed`, `cancelled`). The concrete
+  Plane state within a group (e.g. "Devuelto por Calidad") is set with `/state`.
 - `/state <id>` — pick a real Plane state from a menu (needs a prior state fetch)
 - `/drop <id> [sync]` — delete a task; `sync` also removes the Plane work item
   (asks for confirmation)
