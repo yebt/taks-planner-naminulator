@@ -26,7 +26,7 @@ func TestSQLiteCreateGetUpdateList(t *testing.T) {
 	s := newTestStore(t)
 
 	created, err := s.Create(ctx, domain.Task{
-		Label: "feat-login", Type: domain.TypeFeat, Title: "Login screen", Status: domain.StatusTodo,
+		Label: "feat-login", Type: domain.TypeFeat, Title: "Login screen", Status: domain.StatusUnstarted,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -39,21 +39,21 @@ func TestSQLiteCreateGetUpdateList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Title != "Login screen" || got.Type != domain.TypeFeat || got.Status != domain.StatusTodo {
+	if got.Title != "Login screen" || got.Type != domain.TypeFeat || got.Status != domain.StatusUnstarted {
 		t.Fatalf("roundtrip mismatch: %+v", got)
 	}
 
-	got.Status = domain.StatusInProgress
+	got.Status = domain.StatusStarted
 	if err := s.Update(ctx, got); err != nil {
 		t.Fatal(err)
 	}
 	got2, _ := s.Get(ctx, created.ID)
-	if got2.Status != domain.StatusInProgress {
+	if got2.Status != domain.StatusStarted {
 		t.Fatalf("update not persisted: %s", got2.Status)
 	}
 
 	// second task, different status
-	if _, err := s.Create(ctx, domain.Task{Label: "fix-x", Type: domain.TypeFix, Title: "bug", Status: domain.StatusDone}); err != nil {
+	if _, err := s.Create(ctx, domain.Task{Label: "fix-x", Type: domain.TypeFix, Title: "bug", Status: domain.StatusCompleted}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -65,7 +65,7 @@ func TestSQLiteCreateGetUpdateList(t *testing.T) {
 		t.Fatalf("expected 2 tasks, got %d", len(all))
 	}
 
-	done, err := s.List(ctx, Filter{Status: domain.StatusDone})
+	done, err := s.List(ctx, Filter{Status: domain.StatusCompleted})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestDetailsRoundtrip(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	created, err := s.Create(ctx, domain.Task{
-		Label: "feat-x", Type: domain.TypeFeat, Title: "X", Status: domain.StatusTodo,
+		Label: "feat-x", Type: domain.TypeFeat, Title: "X", Status: domain.StatusUnstarted,
 		Details: domain.TaskDetails{
 			Objective:          "obj",
 			AsA:                "user",
@@ -123,7 +123,7 @@ func TestMigrateAddsDetailsColumnToOldDB(t *testing.T) {
 	}
 	defer s.Close()
 	if _, err := s.Create(context.Background(), domain.Task{
-		Label: "l", Type: domain.TypeFeat, Title: "t", Status: domain.StatusTodo,
+		Label: "l", Type: domain.TypeFeat, Title: "t", Status: domain.StatusUnstarted,
 		Details: domain.TaskDetails{Objective: "o"},
 	}); err != nil {
 		t.Fatalf("create after migration failed: %v", err)
@@ -134,7 +134,7 @@ func TestDatesRoundtrip(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	created, err := s.Create(ctx, domain.Task{
-		Label: "feat-x", Type: domain.TypeFeat, Title: "X", Status: domain.StatusTodo,
+		Label: "feat-x", Type: domain.TypeFeat, Title: "X", Status: domain.StatusUnstarted,
 		StartDate: "2026-06-01", DueDate: "2026-06-02",
 	})
 	if err != nil {
@@ -184,7 +184,7 @@ func TestDailyRoundtrip(t *testing.T) {
 func TestListFilterByDay(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	old, err := s.Create(ctx, domain.Task{Label: "a", Type: domain.TypeFeat, Title: "old", Status: domain.StatusTodo})
+	old, err := s.Create(ctx, domain.Task{Label: "a", Type: domain.TypeFeat, Title: "old", Status: domain.StatusUnstarted})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestListFilterByDay(t *testing.T) {
 	if _, err := s.db.Exec(`UPDATE tasks SET touched_at=? WHERE id=?`, past.Unix(), old.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Create(ctx, domain.Task{Label: "b", Type: domain.TypeFeat, Title: "today", Status: domain.StatusTodo}); err != nil {
+	if _, err := s.Create(ctx, domain.Task{Label: "b", Type: domain.TypeFeat, Title: "today", Status: domain.StatusUnstarted}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.List(ctx, Filter{Day: time.Now()})

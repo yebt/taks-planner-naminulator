@@ -27,48 +27,29 @@ func (t TaskType) Valid() bool {
 	return false
 }
 
-// Status is our own semantic layer sitting on top of Plane's state groups.
-// Plane groups (Backlog/Unstarted/Started/Completed/Cancelled) can hold several
-// internal states, and some "Completed" states are really rejections
-// (e.g. "Devuelto por Calidad") — so we never trust the group blindly.
+// Status is one of Plane's five fixed state groups. A group can hold several
+// concrete Plane states (and some "Completed" states are really rejections,
+// e.g. "Devuelto por Calidad") — that granularity lives in the State field, not
+// here. Status stays coarse and maps 1:1 to a Plane group.
 type Status string
 
 const (
-	StatusBacklog    Status = "backlog"
-	StatusTodo       Status = "todo"
-	StatusInProgress Status = "in_progress"
-	StatusPostponed  Status = "postponed"
-	StatusBlocked    Status = "blocked"
-	StatusDone       Status = "done"
-	StatusRejected   Status = "rejected"
-	StatusCancelled  Status = "cancelled"
+	StatusBacklog   Status = "backlog"
+	StatusUnstarted Status = "unstarted"
+	StatusStarted   Status = "started"
+	StatusCompleted Status = "completed"
+	StatusCancelled Status = "cancelled"
 )
 
-// PlaneGroup maps our semantic status to one of Plane's five fixed state
-// groups. The concrete state within the group is chosen from the project's
-// configured defaults (StateDefaults), since state names vary per instance.
-func (s Status) PlaneGroup() string {
-	switch s {
-	case StatusBacklog, StatusPostponed:
-		return "backlog"
-	case StatusTodo:
-		return "unstarted"
-	case StatusInProgress, StatusBlocked:
-		return "started"
-	case StatusDone, StatusRejected:
-		return "completed"
-	case StatusCancelled:
-		return "cancelled"
-	default:
-		return "unstarted"
-	}
-}
+// PlaneGroup returns the Plane state group for the status. Since Status now
+// equals the group, this is the identity — kept so the syncer can resolve the
+// configured default state for the group.
+func (s Status) PlaneGroup() string { return string(s) }
 
-// Valid reports whether the status is known.
+// Valid reports whether the status is one of the five groups.
 func (s Status) Valid() bool {
 	switch s {
-	case StatusBacklog, StatusTodo, StatusInProgress, StatusPostponed,
-		StatusBlocked, StatusDone, StatusRejected, StatusCancelled:
+	case StatusBacklog, StatusUnstarted, StatusStarted, StatusCompleted, StatusCancelled:
 		return true
 	}
 	return false

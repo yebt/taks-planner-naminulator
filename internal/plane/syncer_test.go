@@ -38,7 +38,7 @@ func TestSyncerPushCreatesAndPersists(t *testing.T) {
 	}
 	defer st.Close()
 	created, err := st.Create(context.Background(), domain.Task{
-		Label: "feat-x", Type: domain.TypeFeat, Title: "X", Status: domain.StatusTodo,
+		Label: "feat-x", Type: domain.TypeFeat, Title: "X", Status: domain.StatusUnstarted,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ func TestSyncerPushSetsLabelAndPriority(t *testing.T) {
 	}
 	defer st.Close()
 	created, _ := st.Create(context.Background(), domain.Task{
-		Label: "fix-x", Type: domain.TypeFix, Title: "X", Status: domain.StatusTodo,
+		Label: "fix-x", Type: domain.TypeFix, Title: "X", Status: domain.StatusUnstarted,
 	})
 
 	sy := NewSyncer(testClient(srv.URL), st, nil)
@@ -122,7 +122,7 @@ func TestSyncerPushMapsStatusToGroupDefault(t *testing.T) {
 	defer st.Close()
 	// in_progress → group "started"; the configured default for that group wins.
 	created, _ := st.Create(context.Background(), domain.Task{
-		Label: "feat-x", Type: domain.TypeFeat, Title: "X", Status: domain.StatusInProgress,
+		Label: "feat-x", Type: domain.TypeFeat, Title: "X", Status: domain.StatusStarted,
 	})
 
 	defaults := map[string]string{"started": "state-started-id"}

@@ -21,20 +21,17 @@ func TestDisplayTitle(t *testing.T) {
 }
 
 func TestPlaneGroup(t *testing.T) {
-	cases := map[Status]string{
-		StatusBacklog:    "backlog",
-		StatusPostponed:  "backlog",
-		StatusTodo:       "unstarted",
-		StatusInProgress: "started",
-		StatusBlocked:    "started",
-		StatusDone:       "completed",
-		StatusRejected:   "completed",
-		StatusCancelled:  "cancelled",
-	}
-	for s, want := range cases {
-		if got := s.PlaneGroup(); got != want {
-			t.Errorf("%s.PlaneGroup() = %q, want %q", s, got, want)
+	// Status now equals the Plane group (identity), and only the 5 are valid.
+	for _, s := range []Status{StatusBacklog, StatusUnstarted, StatusStarted, StatusCompleted, StatusCancelled} {
+		if !s.Valid() {
+			t.Errorf("%s should be a valid status", s)
 		}
+		if got := s.PlaneGroup(); got != string(s) {
+			t.Errorf("%s.PlaneGroup() = %q, want %q", s, got, string(s))
+		}
+	}
+	if Status("in_progress").Valid() || Status("done").Valid() {
+		t.Error("legacy semantic statuses must no longer be valid")
 	}
 }
 

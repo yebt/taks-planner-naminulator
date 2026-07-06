@@ -932,7 +932,7 @@ func (m *chatModel) report(prefix, out string, err error) {
 }
 
 // todoFlags are the first-argument options for /todo; todoDayFlags the second.
-var todoFlags = []string{"all", "in_progress", "todo", "done", "blocked", "postponed", "rejected", "cancelled", "backlog"}
+var todoFlags = []string{"all", "backlog", "unstarted", "started", "completed", "cancelled"}
 var todoDayFlags = []string{"hoy", "ayer"}
 
 // showTodo lists tasks. Bare: in-progress (any day) plus today's todo/done.
@@ -983,9 +983,9 @@ func (m *chatModel) defaultTodo(ctx context.Context) ([]domain.Task, error) {
 	today := time.Now()
 	var out []domain.Task
 	for _, f := range []store.Filter{
-		{Status: domain.StatusInProgress},
-		{Status: domain.StatusTodo, Day: today},
-		{Status: domain.StatusDone, Day: today},
+		{Status: domain.StatusStarted},
+		{Status: domain.StatusUnstarted, Day: today},
+		{Status: domain.StatusCompleted, Day: today},
 	} {
 		ts, err := m.deps.Store.List(ctx, f)
 		if err != nil {
@@ -1015,9 +1015,8 @@ func (m *chatModel) renderTodo(title string, tasks []domain.Task) {
 	typeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111"))
 	idStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
 	order := []domain.Status{
-		domain.StatusInProgress, domain.StatusTodo, domain.StatusBlocked,
-		domain.StatusPostponed, domain.StatusRejected, domain.StatusDone,
-		domain.StatusBacklog, domain.StatusCancelled,
+		domain.StatusStarted, domain.StatusUnstarted, domain.StatusBacklog,
+		domain.StatusCompleted, domain.StatusCancelled,
 	}
 	var b strings.Builder
 	b.WriteString(botLabel.Render(fmt.Sprintf("%s · %d", title, len(tasks))) + "\n")
@@ -1039,10 +1038,10 @@ func (m *chatModel) renderTodo(title string, tasks []domain.Task) {
 		if len(lines) == 0 {
 			continue
 		}
-		dot := statusStyleFor(st).Render("●") // per-row state marker, visible on scroll
-		b.WriteString("\n" + statusStyleFor(st).Render("● "+string(st)) + "\n")
+		glyph := statusStyleFor(st).Render(statusGlyph(st)) // per-row state marker, visible on scroll
+		b.WriteString("\n" + statusStyleFor(st).Render(statusGlyph(st)+" "+m.statusLabel(st)) + "\n")
 		for _, ln := range lines {
-			b.WriteString(dot + " " + ln + "\n")
+			b.WriteString(glyph + " " + ln + "\n")
 		}
 	}
 	b.WriteString("\n" + helpStyle.Render("/todo all · /todo <status> [hoy|ayer] · /task <id>"))
@@ -1053,22 +1052,53 @@ func (m *chatModel) renderTodo(title string, tasks []domain.Task) {
 func statusStyleFor(s domain.Status) lipgloss.Style {
 	var c lipgloss.Color
 	switch s {
-	case domain.StatusDone:
-		c = "42" // green
-	case domain.StatusInProgress:
+	case domain.StatusStarted:
 		c = "214" // orange
-	case domain.StatusTodo:
+	case domain.StatusUnstarted:
 		c = "39" // blue
-	case domain.StatusBlocked, domain.StatusRejected:
-		c = "203" // red
-	case domain.StatusBacklog, domain.StatusPostponed:
-		c = "245" // gray
+	case domain.StatusCompleted:
+		c = "42" // green
 	case domain.StatusCancelled:
-		c = "240" // dim gray
+		c = "203" // red
+	case domain.StatusBacklog:
+		c = "245" // gray
 	default:
 		c = "252"
 	}
 	return lipgloss.NewStyle().Foreground(c)
+}
+
+// statusGlyph is the minimalist per-status marker.
+func statusGlyph(s domain.Status) string {
+	switch s {
+	case domain.StatusBacklog:
+		return "?"
+	case domain.StatusUnstarted:
+		return "○"
+	case domain.StatusStarted:
+		return "▸"
+	case domain.StatusCompleted:
+		return "●"
+	case domain.StatusCancelled:
+		return "✗"
+	default:
+		return "•"
+	}
+}
+
+// statusLabel renders a status with its configured default Plane state in
+// parentheses, e.g. "started (In Progress)".
+func (m *chatModel) statusLabel(s domain.Status) string {
+	if m.deps.Cfg != nil {
+		if id := m.deps.Cfg.Plane.StateDefaults[string(s)]; id != "" {
+			for _, ps := range m.deps.Cfg.Plane.States {
+				if ps.ID == id {
+					return string(s) + " (" + ps.Name + ")"
+				}
+			}
+		}
+	}
+	return string(s)
 }
 
 // openStatePicker shows a menu of the real Plane states (from the config cache)
@@ -1361,19 +1391,16 @@ func (m *chatModel) resumeLast(ctx context.Context) {
 func buildDaily(date string, tasks []domain.Task) string {
 	var b strings.Builder
 	b.WriteString("Daily:  " + date + "\n")
-	var work, blocks, notes []string
+	var work, notes []string
 	for _, t := range tasks {
+		if t.Status == domain.StatusCancelled {
+			continue
+		}
 		code := ""
 		if t.WorkItemSeq > 0 {
 			code = fmt.Sprintf("#%d ", t.WorkItemSeq)
 		}
-		line := fmt.Sprintf("[%s] %s%s", t.Type, code, t.Title)
-		switch t.Status {
-		case domain.StatusBlocked, domain.StatusRejected:
-			blocks = append(blocks, line)
-		default:
-			work = append(work, line)
-		}
+		work = append(work, fmt.Sprintf("[%s] %s%s", t.Type, code, t.Title))
 		if n := strings.TrimSpace(t.Details.TechNotes); n != "" {
 			notes = append(notes, n)
 		}
@@ -1387,8 +1414,9 @@ func buildDaily(date string, tasks []domain.Task) string {
 			b.WriteString("  " + prefix + " " + it + "\n")
 		}
 	}
+	// The deterministic fallback fills Trabajo and Notas; Bloqueos is left to the
+	// LLM daily (there is no "blocked" status — that lives in context).
 	section("Trabajo", "+", work)
-	section("Bloqueos", "#", blocks)
 	section("Notas", ">>", notes)
 	if len(tasks) == 0 {
 		b.WriteString("\n(sin actividad registrada hoy)")

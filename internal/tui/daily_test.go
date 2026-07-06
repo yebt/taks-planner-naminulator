@@ -14,24 +14,28 @@ func TestBuildDaily(t *testing.T) {
 		t.Fatalf("date header: %q", date)
 	}
 	tasks := []domain.Task{
-		{Type: domain.TypeFeat, Title: "Lazy loading", Status: domain.StatusInProgress, WorkItemSeq: 343},
-		{Type: domain.TypeFix, Title: "Migración Sensei2", Status: domain.StatusBlocked},
-		{Type: domain.TypeFeat, Title: "DNS", Status: domain.StatusDone,
+		{Type: domain.TypeFeat, Title: "Lazy loading", Status: domain.StatusStarted, WorkItemSeq: 343},
+		{Type: domain.TypeFix, Title: "Migración Sensei2", Status: domain.StatusUnstarted},
+		{Type: domain.TypeFeat, Title: "DNS", Status: domain.StatusCompleted,
 			Details: domain.TaskDetails{TechNotes: "Usar VPN por restricción de IP"}},
+		{Type: domain.TypeFix, Title: "Descartada", Status: domain.StatusCancelled},
 	}
 	out := buildDaily(date, tasks)
 	for _, want := range []string{
 		"Daily:  2026-02-02 FEB",
 		"Trabajo:",
 		"  + [FEAT] #343 Lazy loading",
-		"Bloqueos:",
-		"  # [FIX] Migración Sensei2",
+		"  + [FIX] Migración Sensei2",
 		"Notas:",
 		"  >> Usar VPN por restricción de IP",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("daily missing %q\n got:\n%s", want, out)
 		}
+	}
+	// cancelled tasks are excluded from the fallback digest.
+	if strings.Contains(out, "Descartada") {
+		t.Fatalf("cancelled task should not appear:\n%s", out)
 	}
 }
 

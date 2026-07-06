@@ -32,7 +32,7 @@ func TestCreateAndListAndStatus(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.ID == 0 || created.Type != "FEAT" || created.Status != "todo" {
+	if created.ID == 0 || created.Type != "FEAT" || created.Status != "unstarted" {
 		t.Fatalf("bad create result: %+v", created)
 	}
 	if created.Label != "feat-login-screen" {
@@ -52,13 +52,13 @@ func TestCreateAndListAndStatus(t *testing.T) {
 	}
 
 	statusOut, err := r.Dispatch(ctx, "set_status",
-		`{"id":`+itoa(created.ID)+`,"status":"in_progress"}`)
+		`{"id":`+itoa(created.ID)+`,"status":"started"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var updated taskView
 	_ = json.Unmarshal([]byte(statusOut), &updated)
-	if updated.Status != "in_progress" {
+	if updated.Status != "started" {
 		t.Fatalf("status not updated: %+v", updated)
 	}
 }

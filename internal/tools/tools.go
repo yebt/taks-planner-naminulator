@@ -60,7 +60,7 @@ func (r *Registry) Definitions() []llm.Tool {
 				"title":       strProp("Short task title"),
 				"description": strProp("Optional longer description"),
 				"label":       strProp("Optional short label; auto-generated from type+title if omitted"),
-				"status":      enumProp("Initial status", statuses()...),
+				"status":      enumProp("Initial status — one of Plane's 5 state groups (default unstarted)", statuses()...),
 				"start_date":  strProp("Plane start date, YYYY-MM-DD (defaults to today if omitted)"),
 				"due_date":    strProp("Plane due date, YYYY-MM-DD (defaults to start_date + 1 day)"),
 			}, "type", "title"),
@@ -74,15 +74,15 @@ func (r *Registry) Definitions() []llm.Tool {
 		},
 		{
 			Name:        "set_status",
-			Description: "Change a task's status (e.g. postpone, block, complete, reject).",
+			Description: "Move a task between Plane's 5 state groups (backlog, unstarted, started, completed, cancelled).",
 			Parameters: obj(props{
 				"id":     intProp("Task id"),
-				"status": enumProp("New status", statuses()...),
+				"status": enumProp("New status — one of Plane's 5 state groups", statuses()...),
 			}, "id", "status"),
 		},
 		{
 			Name:        "set_state",
-			Description: "Set the Plane state name for a task (the concrete workflow state).",
+			Description: "Set the concrete Plane state name for a task (e.g. 'In Progress', 'Devuelto por Calidad') within its group.",
 			Parameters: obj(props{
 				"id":    intProp("Task id"),
 				"state": strProp("Plane state name, e.g. 'In Progress'"),
@@ -211,7 +211,7 @@ func (r *Registry) createTask(ctx context.Context, args string) (string, error) 
 	}
 	status := domain.Status(in.Status)
 	if status == "" {
-		status = domain.StatusTodo
+		status = domain.StatusUnstarted
 	}
 	if !status.Valid() {
 		return "", fmt.Errorf("create_task: invalid status %q", in.Status)
@@ -465,9 +465,8 @@ func slug(s string) string {
 
 func statuses() []string {
 	return []string{
-		string(domain.StatusBacklog), string(domain.StatusTodo), string(domain.StatusInProgress),
-		string(domain.StatusPostponed), string(domain.StatusBlocked), string(domain.StatusDone),
-		string(domain.StatusRejected), string(domain.StatusCancelled),
+		string(domain.StatusBacklog), string(domain.StatusUnstarted), string(domain.StatusStarted),
+		string(domain.StatusCompleted), string(domain.StatusCancelled),
 	}
 }
 

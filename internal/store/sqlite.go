@@ -89,6 +89,15 @@ func (s *SQLite) migrate() error {
 	if err := s.ensureColumn("tasks", "work_item_seq", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// Collapse legacy semantic statuses into Plane's 5 state groups (idempotent).
+	for old, group := range map[string]string{
+		"todo": "unstarted", "in_progress": "started", "blocked": "started",
+		"postponed": "backlog", "done": "completed", "rejected": "completed",
+	} {
+		if _, err := s.db.Exec(`UPDATE tasks SET status=? WHERE status=?`, group, old); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
