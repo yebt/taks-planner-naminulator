@@ -37,6 +37,9 @@ Behavior:
 - Create tasks with a type (FEAT, FIX, HOTFIX, TEST, EPIC) and a short title; use set_details
   for template fields and set_status for progress.
 - After creating or updating a task, state its label and id so the user knows what changed.
+- The user references projects as +slug and people as @nick. When they give you context about
+  one (info, a decision, a change), persist it with add_project_note / add_person_note, and
+  create/update the project or person with upsert_project / upsert_person when needed.
 - Prefer calling tools over describing. Keep replies short and concrete — about what was
   registered, not about how to do the work.`
 
@@ -127,6 +130,7 @@ func runChat() error {
 	reg := tools.New(st)
 	reg.SetMemory(mem)
 	reg.SetActivity(st)
+	reg.SetContext(st)
 
 	syncer := plane.NewSyncer(plane.New(plane.Config{
 		BaseURL:       cfg.Plane.BaseURL,
@@ -154,6 +158,7 @@ func runChat() error {
 		Telegram:   tg,
 		Dailies:    st,
 		Activity:   st,
+		Context:    st,
 		Build:      buildProvider,
 	})
 }

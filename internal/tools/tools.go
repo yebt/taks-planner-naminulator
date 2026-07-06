@@ -29,6 +29,7 @@ type Registry struct {
 	mem      memory.Memory
 	sync     Syncer
 	activity store.ActivityStore
+	ctxStore store.ContextStore
 }
 
 // New builds a tool registry over a store.
@@ -42,6 +43,11 @@ func (r *Registry) SetSyncer(s Syncer) { r.sync = s }
 
 // SetActivity enables per-task activity logging after each mutation.
 func (r *Registry) SetActivity(a store.ActivityStore) { r.activity = a }
+
+// SetContext enables the project/person context tools.
+func (r *Registry) SetContext(c store.ContextStore) { r.ctxStore = c }
+
+func (r *Registry) ctxEnabled() bool { return r.ctxStore != nil }
 
 // logActivity best-effort records a task interaction (never fails the op).
 func (r *Registry) logActivity(ctx context.Context, taskID int64, kind, note string) {
@@ -142,6 +148,46 @@ func (r *Registry) Definitions() []llm.Tool {
 			},
 		)
 	}
+	if r.ctxEnabled() {
+		defs = append(defs,
+			llm.Tool{
+				Name:        "upsert_project",
+				Description: "Create or update a project (referenced as +slug). Pass only the fields you want to set.",
+				Parameters: obj(props{
+					"slug":        strProp("Project slug (the +slug identifier)"),
+					"name":        strProp("Human name"),
+					"description": strProp("Short summary: stack, purpose, constraints"),
+				}, "slug"),
+			},
+			llm.Tool{
+				Name:        "add_project_note",
+				Description: "Append context to a project: info, a decision made, or a change that happened.",
+				Parameters: obj(props{
+					"slug": strProp("Project slug"),
+					"kind": enumProp("Note kind", "info", "decision", "change"),
+					"text": strProp("The note"),
+				}, "slug", "text"),
+			},
+			llm.Tool{
+				Name:        "upsert_person",
+				Description: "Create or update a person (referenced as @nick). Pass only the fields you want to set.",
+				Parameters: obj(props{
+					"nick": strProp("Person nick (the @nick identifier)"),
+					"name": strProp("Full name"),
+					"role": strProp("Area / role, e.g. 'área comercial'"),
+				}, "nick"),
+			},
+			llm.Tool{
+				Name:        "add_person_note",
+				Description: "Append context about a person: info, a decision, or a change.",
+				Parameters: obj(props{
+					"nick": strProp("Person nick"),
+					"kind": enumProp("Note kind", "info", "decision", "change"),
+					"text": strProp("The note"),
+				}, "nick", "text"),
+			},
+		)
+	}
 	return defs
 }
 
@@ -164,8 +210,84 @@ func (r *Registry) Dispatch(ctx context.Context, name, args string) (string, err
 		return r.recallMemory(ctx, args)
 	case "remember_note":
 		return r.rememberNote(ctx, args)
+	case "upsert_project":
+		return r.upsertProject(ctx, args)
+	case "add_project_note":
+		return r.addProjectNote(ctx, args)
+	case "upsert_person":
+		return r.upsertPerson(ctx, args)
+	case "add_person_note":
+		return r.addPersonNote(ctx, args)
 	default:
 		return "", fmt.Errorf("unknown tool %q", name)
+	}
+}
+
+func (r *Registry) upsertProject(ctx context.Context, args string) (string, error) {
+	var in struct{ Slug, Name, Description string }
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("upsert_project: bad args: %w", err)
+	}
+	if strings.TrimSpace(in.Slug) == "" {
+		return "", fmt.Errorf("upsert_project: slug is required")
+	}
+	p, err := r.ctxStore.UpsertProject(ctx, domain.Project{Slug: in.Slug, Name: in.Name, Description: in.Description})
+	if err != nil {
+		return "", err
+	}
+	return marshal(map[string]any{"label": "+" + p.Slug})
+}
+
+func (r *Registry) addProjectNote(ctx context.Context, args string) (string, error) {
+	var in struct{ Slug, Kind, Text string }
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("add_project_note: bad args: %w", err)
+	}
+	if strings.TrimSpace(in.Slug) == "" || strings.TrimSpace(in.Text) == "" {
+		return "", fmt.Errorf("add_project_note: slug and text are required")
+	}
+	if err := r.ctxStore.AddProjectNote(ctx, in.Slug, noteKind(in.Kind), in.Text); err != nil {
+		return "", err
+	}
+	return marshal(map[string]any{"label": "+" + in.Slug})
+}
+
+func (r *Registry) upsertPerson(ctx context.Context, args string) (string, error) {
+	var in struct{ Nick, Name, Role string }
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("upsert_person: bad args: %w", err)
+	}
+	if strings.TrimSpace(in.Nick) == "" {
+		return "", fmt.Errorf("upsert_person: nick is required")
+	}
+	p, err := r.ctxStore.UpsertPerson(ctx, domain.Person{Nick: in.Nick, Name: in.Name, Role: in.Role})
+	if err != nil {
+		return "", err
+	}
+	return marshal(map[string]any{"label": "@" + p.Nick})
+}
+
+func (r *Registry) addPersonNote(ctx context.Context, args string) (string, error) {
+	var in struct{ Nick, Kind, Text string }
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("add_person_note: bad args: %w", err)
+	}
+	if strings.TrimSpace(in.Nick) == "" || strings.TrimSpace(in.Text) == "" {
+		return "", fmt.Errorf("add_person_note: nick and text are required")
+	}
+	if err := r.ctxStore.AddPersonNote(ctx, in.Nick, noteKind(in.Kind), in.Text); err != nil {
+		return "", err
+	}
+	return marshal(map[string]any{"label": "@" + in.Nick})
+}
+
+// noteKind defaults a blank/unknown kind to "info".
+func noteKind(k string) string {
+	switch k {
+	case "info", "decision", "change":
+		return k
+	default:
+		return "info"
 	}
 }
 

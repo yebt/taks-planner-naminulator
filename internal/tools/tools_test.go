@@ -186,6 +186,50 @@ func TestActivityLoggedOnMutations(t *testing.T) {
 	}
 }
 
+func TestContextTools(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	r := New(st)
+	r.SetContext(st)
+
+	if n := len(r.Definitions()); n != 10 { // 6 base + 4 context
+		t.Fatalf("expected 10 tools with context enabled, got %d", n)
+	}
+
+	if _, err := r.Dispatch(ctx, "upsert_project", `{"slug":"liquida","description":"PHP app"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Dispatch(ctx, "add_project_note", `{"slug":"LIQUIDA","kind":"decision","text":"migró a PHP 8.3"}`); err != nil {
+		t.Fatal(err)
+	}
+	p, err := st.GetProject(ctx, "liquida")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Description != "PHP app" || len(p.Notes) != 1 || p.Notes[0].Kind != "decision" {
+		t.Fatalf("project not persisted via tools: %+v", p)
+	}
+	if _, err := r.Dispatch(ctx, "upsert_project", `{"description":"x"}`); err == nil {
+		t.Fatal("expected error for missing slug")
+	}
+
+	// person; a blank/omitted kind defaults to "info"
+	if _, err := r.Dispatch(ctx, "upsert_person", `{"nick":"kari","role":"comercial"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Dispatch(ctx, "add_person_note", `{"nick":"kari","text":"pidió cambios"}`); err != nil {
+		t.Fatal(err)
+	}
+	per, _ := st.GetPerson(ctx, "kari")
+	if len(per.Notes) != 1 || per.Notes[0].Kind != "info" {
+		t.Fatalf("person note default kind wrong: %+v", per.Notes)
+	}
+}
+
 func TestCreateInvalidType(t *testing.T) {
 	r := newReg(t)
 	if _, err := r.Dispatch(context.Background(), "create_task", `{"type":"nope","title":"x"}`); err == nil {

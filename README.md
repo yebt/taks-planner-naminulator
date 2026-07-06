@@ -157,6 +157,20 @@ start/due dates (defaulting to today / tomorrow).
 - `/recall <query>` — search long-term memory (Engram, if installed)
 - `/remember <note>` — save a note to long-term memory
 
+**Projects & people**
+
+- `/projects` — list projects (`+slug`)
+- `/project <slug>` — show a project. `new <slug> [description]` creates it;
+  `<slug> note [info|decision|change] <text>` appends context
+- `/people` — list people (`@nick`)
+- `/person <nick>` — show a person. `new <nick> [role]` creates it;
+  `<nick> note [info|decision|change] <text>` appends context
+
+Projects and people accumulate context (info, decisions, changes). The agent
+persists it for you with its `upsert_project` / `add_project_note` /
+`upsert_person` / `add_person_note` tools when you say things like "guardá que
++liquida migró a PHP 8.3" or "@kari es Karime del área comercial".
+
 **Session**
 
 - `/clear` — clear the on-screen conversation and agent history

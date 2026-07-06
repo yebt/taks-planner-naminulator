@@ -19,9 +19,14 @@ func (s *SQLite) UpsertProject(ctx context.Context, p domain.Project) (domain.Pr
 		p.CreatedAt = now
 	}
 	p.UpdatedAt = now
+	// Empty incoming fields keep the existing value (so an upsert to touch one
+	// field doesn't wipe the others).
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO projects (slug,name,description,created_at,updated_at) VALUES (?,?,?,?,?)
-		 ON CONFLICT(slug) DO UPDATE SET name=excluded.name, description=excluded.description, updated_at=excluded.updated_at`,
+		 ON CONFLICT(slug) DO UPDATE SET
+		   name        = CASE WHEN excluded.name        != '' THEN excluded.name        ELSE name        END,
+		   description = CASE WHEN excluded.description != '' THEN excluded.description ELSE description END,
+		   updated_at  = excluded.updated_at`,
 		p.Slug, p.Name, p.Description, p.CreatedAt.Unix(), p.UpdatedAt.Unix())
 	if err != nil {
 		return domain.Project{}, err
@@ -86,7 +91,10 @@ func (s *SQLite) UpsertPerson(ctx context.Context, p domain.Person) (domain.Pers
 	p.UpdatedAt = now
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO people (nick,name,role,created_at,updated_at) VALUES (?,?,?,?,?)
-		 ON CONFLICT(nick) DO UPDATE SET name=excluded.name, role=excluded.role, updated_at=excluded.updated_at`,
+		 ON CONFLICT(nick) DO UPDATE SET
+		   name       = CASE WHEN excluded.name != '' THEN excluded.name ELSE name END,
+		   role       = CASE WHEN excluded.role != '' THEN excluded.role ELSE role END,
+		   updated_at = excluded.updated_at`,
 		p.Nick, p.Name, p.Role, p.CreatedAt.Unix(), p.UpdatedAt.Unix())
 	if err != nil {
 		return domain.Person{}, err
