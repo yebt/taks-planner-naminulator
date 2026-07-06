@@ -157,6 +157,35 @@ func TestCreateDefaultsDates(t *testing.T) {
 	}
 }
 
+func TestActivityLoggedOnMutations(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	r := New(st)
+	r.SetActivity(st)
+
+	out, err := r.Dispatch(ctx, "create_task", `{"type":"feat","title":"X"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v taskView
+	_ = json.Unmarshal([]byte(out), &v)
+	if _, err := r.Dispatch(ctx, "set_status", `{"id":`+itoa(v.ID)+`,"status":"started"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	acts, err := st.ActivityForTask(ctx, v.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acts) != 2 || acts[0].Kind != "create" || acts[1].Kind != "status" {
+		t.Fatalf("expected create+status activity, got %+v", acts)
+	}
+}
+
 func TestCreateInvalidType(t *testing.T) {
 	r := newReg(t)
 	if _, err := r.Dispatch(context.Background(), "create_task", `{"type":"nope","title":"x"}`); err == nil {

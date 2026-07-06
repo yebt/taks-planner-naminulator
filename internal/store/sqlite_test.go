@@ -205,6 +205,43 @@ func TestListFilterByDay(t *testing.T) {
 	}
 }
 
+func TestActivityLog(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	tk, err := s.Create(ctx, domain.Task{Label: "a", Type: domain.TypeFeat, Title: "X", Status: domain.StatusStarted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.LogActivity(ctx, tk.ID, "status", "→ started"); err != nil {
+		t.Fatal(err)
+	}
+	// A second activity three days ago (inserted directly to control the time).
+	past := time.Now().AddDate(0, 0, -3)
+	if _, err := s.db.Exec(`INSERT INTO activity (task_id, at, kind, note) VALUES (?,?,?,?)`,
+		tk.ID, past.Unix(), "create", "created a"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The SAME task surfaces on both days (this is the whole point of the log).
+	if got, _ := s.TasksWithActivityOn(ctx, time.Now()); len(got) != 1 {
+		t.Fatalf("today should include the task, got %d", len(got))
+	}
+	if got, _ := s.TasksWithActivityOn(ctx, past); len(got) != 1 {
+		t.Fatalf("3-days-ago should include the task, got %d", len(got))
+	}
+	if got, _ := s.TasksWithActivityOn(ctx, time.Now().AddDate(0, 0, -10)); len(got) != 0 {
+		t.Fatalf("a day with no activity should be empty, got %d", len(got))
+	}
+
+	acts, err := s.ActivityForTask(ctx, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acts) != 2 || acts[0].Note != "created a" { // oldest first
+		t.Fatalf("activity history wrong: %+v", acts)
+	}
+}
+
 func TestSQLiteNotFound(t *testing.T) {
 	s := newTestStore(t)
 	_, err := s.Get(context.Background(), 999)

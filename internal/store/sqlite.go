@@ -59,6 +59,14 @@ func (s *SQLite) migrate() error {
   title      TEXT    NOT NULL DEFAULT '',
   updated_at INTEGER NOT NULL
 );`,
+		`CREATE TABLE IF NOT EXISTS activity (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  at      INTEGER NOT NULL,
+  kind    TEXT    NOT NULL DEFAULT '',
+  note    TEXT    NOT NULL DEFAULT ''
+);`,
+		`CREATE INDEX IF NOT EXISTS idx_activity_at ON activity(at);`,
 		`CREATE TABLE IF NOT EXISTS dailies (
   date       TEXT    PRIMARY KEY,
   content    TEXT    NOT NULL DEFAULT '',
@@ -244,6 +252,59 @@ func (s *SQLite) Delete(ctx context.Context, id int64) error {
 		return fmt.Errorf("%w: id=%d", ErrNotFound, id)
 	}
 	return nil
+}
+
+// LogActivity records one interaction with a task.
+func (s *SQLite) LogActivity(ctx context.Context, taskID int64, kind, note string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO activity (task_id, at, kind, note) VALUES (?,?,?,?)`,
+		taskID, time.Now().Unix(), kind, note)
+	return err
+}
+
+// TasksWithActivityOn returns the distinct tasks that had any activity on the
+// given calendar day, most-recently-touched first.
+func (s *SQLite) TasksWithActivityOn(ctx context.Context, day time.Time) ([]domain.Task, error) {
+	start := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, day.Location())
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+selectCols+` FROM tasks WHERE id IN (
+		   SELECT DISTINCT task_id FROM activity WHERE at >= ? AND at < ?
+		 ) ORDER BY touched_at DESC, id DESC`,
+		start.Unix(), start.AddDate(0, 0, 1).Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Task
+	for rows.Next() {
+		t, err := scanRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ActivityForTask returns a task's activity, oldest first.
+func (s *SQLite) ActivityForTask(ctx context.Context, taskID int64) ([]Activity, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT at, kind, note FROM activity WHERE task_id = ? ORDER BY at ASC, id ASC`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Activity
+	for rows.Next() {
+		var a Activity
+		var at int64
+		if err := rows.Scan(&at, &a.Kind, &a.Note); err != nil {
+			return nil, err
+		}
+		a.At = time.Unix(at, 0).UTC()
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 // SaveDaily upserts the digest for a date.

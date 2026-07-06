@@ -56,6 +56,7 @@ type ChatDeps struct {
 	Syncer     Syncer
 	Telegram   Telegram
 	Dailies    store.DailyStore
+	Activity   store.ActivityStore
 	Build      func(cfg config.Config, name string) (llm.Provider, error)
 }
 
@@ -1228,7 +1229,15 @@ func dailyDayArg(rest []string) time.Time {
 // the day's tasks, any previously stored/edited draft, and an optional
 // instruction so prior modifications are respected.
 func (m *chatModel) generateDailyCmd(ctx context.Context, day time.Time, instruction string) tea.Cmd {
-	tasks, err := m.deps.Store.List(ctx, store.Filter{Day: day})
+	// Prefer the activity log (a task surfaces on every day it was worked on);
+	// fall back to the last-touched filter when it's unavailable.
+	var tasks []domain.Task
+	var err error
+	if m.deps.Activity != nil {
+		tasks, err = m.deps.Activity.TasksWithActivityOn(ctx, day)
+	} else {
+		tasks, err = m.deps.Store.List(ctx, store.Filter{Day: day})
+	}
 	if err != nil {
 		m.add("err", err.Error())
 		return nil
@@ -1486,7 +1495,15 @@ func (m *chatModel) showTask(ctx context.Context, idStr string) {
 		t.CreatedAt.Local().Format("2006-01-02 15:04"),
 		t.UpdatedAt.Local().Format("2006-01-02 15:04"),
 		t.TouchedAt.Local().Format("2006-01-02 15:04")))
-	m.add("raw", b.String())
+	if m.deps.Activity != nil {
+		if acts, err := m.deps.Activity.ActivityForTask(ctx, t.ID); err == nil && len(acts) > 0 {
+			b.WriteString("\n\n" + head.Render("Historial") + "\n")
+			for _, a := range acts {
+				b.WriteString(fmt.Sprintf("- %s  %s\n", a.At.Local().Format("2006-01-02 15:04"), a.Note))
+			}
+		}
+	}
+	m.add("raw", strings.TrimRight(b.String(), "\n"))
 }
 
 func orDash(s string) string {

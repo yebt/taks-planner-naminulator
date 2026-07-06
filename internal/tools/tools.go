@@ -25,9 +25,10 @@ type Syncer interface {
 
 // Registry wires the tool set to a task store, long-term memory, and Plane sync.
 type Registry struct {
-	store store.TaskStore
-	mem   memory.Memory
-	sync  Syncer
+	store    store.TaskStore
+	mem      memory.Memory
+	sync     Syncer
+	activity store.ActivityStore
 }
 
 // New builds a tool registry over a store.
@@ -38,6 +39,16 @@ func (r *Registry) SetMemory(m memory.Memory) { r.mem = m }
 
 // SetSyncer enables automatic push to Plane after a task mutation.
 func (r *Registry) SetSyncer(s Syncer) { r.sync = s }
+
+// SetActivity enables per-task activity logging after each mutation.
+func (r *Registry) SetActivity(a store.ActivityStore) { r.activity = a }
+
+// logActivity best-effort records a task interaction (never fails the op).
+func (r *Registry) logActivity(ctx context.Context, taskID int64, kind, note string) {
+	if r.activity != nil {
+		_ = r.activity.LogActivity(ctx, taskID, kind, note)
+	}
+}
 
 func (r *Registry) memEnabled() bool { return r.mem != nil && r.mem.Available() }
 
@@ -243,6 +254,7 @@ func (r *Registry) createTask(ctx context.Context, args string) (string, error) 
 		return "", err
 	}
 	r.pushSync(ctx, &t)
+	r.logActivity(ctx, t.ID, "create", "created "+t.Label)
 	return marshal(view(t))
 }
 
@@ -283,6 +295,7 @@ func (r *Registry) setStatus(ctx context.Context, args string) (string, error) {
 		return "", err
 	}
 	r.pushSync(ctx, &t)
+	r.logActivity(ctx, t.ID, "status", "→ "+string(status))
 	return marshal(view(t))
 }
 
@@ -303,6 +316,7 @@ func (r *Registry) setState(ctx context.Context, args string) (string, error) {
 		return "", err
 	}
 	r.pushSync(ctx, &t)
+	r.logActivity(ctx, t.ID, "state", "state: "+in.State)
 	return marshal(view(t))
 }
 
@@ -368,6 +382,7 @@ func (r *Registry) setDetails(ctx context.Context, args string) (string, error) 
 		return "", err
 	}
 	r.pushSync(ctx, &t)
+	r.logActivity(ctx, t.ID, "details", "details updated")
 	return marshal(view(t))
 }
 
@@ -386,6 +401,7 @@ func (r *Registry) dropTask(ctx context.Context, args string) (string, error) {
 	if err := r.store.Delete(ctx, in.ID); err != nil {
 		return "", err
 	}
+	r.logActivity(ctx, in.ID, "drop", "dropped "+t.Label)
 	return marshal(view(t))
 }
 

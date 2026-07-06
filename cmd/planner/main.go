@@ -126,6 +126,7 @@ func runChat() error {
 	mem := memory.Detect(cfg.Memory.Project)
 	reg := tools.New(st)
 	reg.SetMemory(mem)
+	reg.SetActivity(st)
 
 	syncer := plane.NewSyncer(plane.New(plane.Config{
 		BaseURL:       cfg.Plane.BaseURL,
@@ -152,6 +153,7 @@ func runChat() error {
 		Syncer:     syncer,
 		Telegram:   tg,
 		Dailies:    st,
+		Activity:   st,
 		Build:      buildProvider,
 	})
 }

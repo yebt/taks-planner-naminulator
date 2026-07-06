@@ -30,6 +30,21 @@ type DailyStore interface {
 	ListDailies(ctx context.Context) ([]Daily, error)
 }
 
+// Activity is one recorded interaction with a task.
+type Activity struct {
+	At   time.Time
+	Kind string // create | status | state | details | drop
+	Note string
+}
+
+// ActivityStore records per-task interactions so a task can surface in the
+// digest of every day it was worked on (not only its last touched_at).
+type ActivityStore interface {
+	LogActivity(ctx context.Context, taskID int64, kind, note string) error
+	TasksWithActivityOn(ctx context.Context, day time.Time) ([]domain.Task, error)
+	ActivityForTask(ctx context.Context, taskID int64) ([]Activity, error)
+}
+
 // TaskStore is the persistence port.
 type TaskStore interface {
 	Create(ctx context.Context, t domain.Task) (domain.Task, error)
