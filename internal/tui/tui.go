@@ -91,7 +91,25 @@ func newChatModel(deps ChatDeps) *chatModel {
 		histPos: -1,
 	}
 	m.add("sys", "planner harness — type a message, or / for commands. Try /help.")
+	m.healthCheck()
 	return m
+}
+
+// healthCheck surfaces, on startup, whether the essentials and integrations are
+// configured: a blocking-looking alert when the LLM can't run, and non-blocking
+// warnings for Plane/Telegram (their commands degrade gracefully).
+func (m *chatModel) healthCheck() {
+	cfg := m.deps.Cfg
+	if cfg != nil && !cfg.ProvidersReady() {
+		m.add("alert", "LLM not functional: provider '"+cfg.ActiveProvider+
+			"' has no API key. Set one with /key "+cfg.ActiveProvider+" <key> or run `planner config`.")
+	}
+	if m.deps.Syncer == nil || !m.deps.Syncer.Configured() {
+		m.add("warn", "Plane not configured — /sync, /pull and /state are off until you set it in `planner config` → Plane.")
+	}
+	if m.deps.Telegram == nil || !m.deps.Telegram.Configured() {
+		m.add("warn", "Telegram not configured — you can build/edit dailies, but /daily send won't work until you set it in `planner config` → Telegram.")
+	}
 }
 
 // --- styles ---
@@ -106,6 +124,7 @@ var (
 	sysStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Italic(true)
 	cmdStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("213"))
 	errStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
+	warnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
 	sugStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 	selStyle  = lipgloss.NewStyle().Bold(true).
@@ -1020,9 +1039,10 @@ func (m *chatModel) renderTodo(title string, tasks []domain.Task) {
 		if len(lines) == 0 {
 			continue
 		}
+		dot := statusStyleFor(st).Render("●") // per-row state marker, visible on scroll
 		b.WriteString("\n" + statusStyleFor(st).Render("● "+string(st)) + "\n")
 		for _, ln := range lines {
-			b.WriteString("  " + ln + "\n")
+			b.WriteString(dot + " " + ln + "\n")
 		}
 	}
 	b.WriteString("\n" + helpStyle.Render("/todo all · /todo <status> [hoy|ayer] · /task <id>"))
@@ -1858,6 +1878,10 @@ func (m *chatModel) setContent() {
 			blocks = append(blocks, toolStyle.Render(e.text))
 		case "err":
 			blocks = append(blocks, body.Inherit(errStyle).Render("error: "+e.text))
+		case "alert":
+			blocks = append(blocks, body.Inherit(errStyle).Render("⚠ "+e.text))
+		case "warn":
+			blocks = append(blocks, body.Inherit(warnStyle).Render("⚠ "+e.text))
 		case "raw":
 			blocks = append(blocks, e.text) // pre-styled/wrapped, passthrough
 		default:

@@ -1,0 +1,10 @@
+# build artifacts
+/bin/
+/planner
+
+# local runtime data
+*.db
+
+# OS / editor
+.DS_Store
+.atl
