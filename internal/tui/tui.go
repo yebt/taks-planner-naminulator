@@ -154,6 +154,8 @@ type chatModel struct {
 	suggestions    []suggestion
 	selected       int
 	thinking       bool
+	thinkStart     time.Time       // when the current LLM call began (for the elapsed timer)
+	spinner        int             // animation frame
 	quitArmed      bool            // first ctrl+c clears; second quits
 	confirm        *pendingConfirm // non-nil while awaiting y/n
 	statePick      *statePicker    // non-nil while picking a Plane state
@@ -164,12 +166,13 @@ type chatModel struct {
 	histPos        int             // -1 = not navigating
 	convID         int64           // 0 = unsaved
 
-	// mouse selection (anchored in content-line coords so it survives scroll)
+	// mouse selection: character-granular, anchored in content coords (line,col)
+	// so it survives scroll. Left-drag selects; right-click copies; esc cancels.
 	selecting    bool
-	dragged      bool // true once motion/scroll happens after press (so a plain click won't copy)
+	dragged      bool // true once motion/scroll happens after press
 	selActive    bool
-	selStart     int
-	selEnd       int
+	selSL, selSC int      // selection start (line, col)
+	selEL, selEC int      // selection end (line, col)
 	contentLines []string // plain (ANSI-stripped) conversation lines
 	toast        string   // transient status (e.g. "copied N chars")
 }
@@ -248,6 +251,13 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clearToastMsg:
 		m.toast = ""
 		return m, nil
+
+	case tickMsg:
+		if !m.thinking {
+			return m, nil // stop ticking when the call finishes
+		}
+		m.spinner++
+		return m, spinnerTick()
 	}
 
 	var cmd tea.Cmd
@@ -267,9 +277,18 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.quitArmed = false // any other key disarms
-	if m.selActive {    // any key clears a lingering selection highlight
+	if m.selActive {    // any key clears a lingering selection highlight (esc cancels)
 		m.selActive = false
 		m.setContent()
+	}
+
+	// ctrl+l clears the on-screen content (keeps agent context), unless busy.
+	if msg.Type == tea.KeyCtrlL {
+		if !m.thinking {
+			m.entries = nil
+			m.setContent()
+		}
+		return m, nil
 	}
 
 	// Awaiting a y/n confirmation: swallow every other key until decided.
@@ -397,6 +416,14 @@ type copiedMsg struct {
 	err error
 }
 type clearToastMsg struct{}
+type tickMsg struct{}
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// spinnerTick drives the thinking animation/elapsed timer.
+func spinnerTick() tea.Cmd {
+	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} })
+}
 
 func copyCmd(text string) tea.Cmd {
 	return func() tea.Msg {
@@ -414,47 +441,51 @@ func (m *chatModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		if m.selecting {
-			m.dragged = true // scrolling mid-press counts as extending the selection
+			m.dragged = true // scrolling mid-drag extends the selection
 			m.selActive = true
-			m.selEnd = m.contentLineAt(msg.Y)
+			m.selEL, m.selEC = m.contentLineAt(msg.Y), msg.X
 			m.setContent()
 		}
 		return m, cmd
+	case tea.MouseButtonRight:
+		// Right click copies the current selection (this is the trigger — not release).
+		if msg.Action == tea.MouseActionPress && m.selActive {
+			text := m.selectedText()
+			m.selActive = false
+			m.setContent()
+			if strings.TrimSpace(text) == "" {
+				return m, nil
+			}
+			return m, copyCmd(text)
+		}
+		return m, nil
 	}
 	switch msg.Action {
 	case tea.MouseActionPress:
 		if msg.Button == tea.MouseButtonLeft {
-			// Anchor the selection but don't highlight or copy yet — a plain
-			// click (no motion) must do nothing.
+			// Anchor but don't highlight yet — a plain click (no drag) does nothing.
 			m.selecting = true
 			m.dragged = false
-			m.selStart = m.contentLineAt(msg.Y)
-			m.selEnd = m.selStart
+			m.selActive = false
+			m.selSL, m.selSC = m.contentLineAt(msg.Y), msg.X
+			m.selEL, m.selEC = m.selSL, m.selSC
 		}
 	case tea.MouseActionMotion:
 		if m.selecting {
 			m.dragged = true
 			m.selActive = true
-			m.selEnd = m.contentLineAt(msg.Y)
+			m.selEL, m.selEC = m.contentLineAt(msg.Y), msg.X
 			m.setContent()
 		}
 	case tea.MouseActionRelease:
 		if m.selecting {
 			m.selecting = false
-			// A plain click (no drag) clears everything without copying.
 			if !m.dragged {
-				m.selActive = false
+				m.selActive = false // plain click → nothing
 				return m, nil
 			}
-			m.selEnd = m.contentLineAt(msg.Y)
-			text := m.selectedText()
-			m.setContent()
-			if strings.TrimSpace(text) == "" {
-				m.selActive = false
-				m.setContent()
-				return m, nil
-			}
-			return m, copyCmd(text)
+			m.selEL, m.selEC = m.contentLineAt(msg.Y), msg.X
+			m.setContent() // keep the highlight; copy waits for right-click
 		}
 	}
 	return m, nil
@@ -473,30 +504,65 @@ func (m *chatModel) contentLineAt(y int) int {
 	return line
 }
 
-func (m *chatModel) selRange() (int, int) {
-	a, b := m.selStart, m.selEnd
-	if a > b {
-		a, b = b, a
+// orderedSel returns the selection endpoints normalized so start ≤ end, with
+// line indices clamped to the available content.
+func (m *chatModel) orderedSel() (sl, sc, el, ec int) {
+	sl, sc, el, ec = m.selSL, m.selSC, m.selEL, m.selEC
+	if el < sl || (el == sl && ec < sc) {
+		sl, sc, el, ec = el, ec, sl, sc
 	}
 	n := len(m.contentLines)
-	if a < 0 {
-		a = 0
+	if sl < 0 {
+		sl = 0
 	}
-	if b > n-1 {
-		b = n - 1
+	if el > n-1 {
+		el = n - 1
 	}
-	return a, b
+	return sl, sc, el, ec
 }
 
+func clampCol(c, n int) int {
+	if c < 0 {
+		return 0
+	}
+	if c > n {
+		return n
+	}
+	return c
+}
+
+// selectedText extracts the character range spanning the selection.
 func (m *chatModel) selectedText() string {
 	if len(m.contentLines) == 0 {
 		return ""
 	}
-	a, b := m.selRange()
-	if a > b || a < 0 {
-		return ""
+	sl, sc, el, ec := m.orderedSel()
+	if sl == el {
+		r := []rune(m.contentLines[sl])
+		a, b := clampCol(sc, len(r)), clampCol(ec+1, len(r))
+		if a >= b {
+			return ""
+		}
+		return string(r[a:b])
 	}
-	return strings.Join(m.contentLines[a:b+1], "\n")
+	first := []rune(m.contentLines[sl])
+	parts := []string{string(first[clampCol(sc, len(first)):])}
+	for i := sl + 1; i < el; i++ {
+		parts = append(parts, m.contentLines[i])
+	}
+	last := []rune(m.contentLines[el])
+	parts = append(parts, string(last[:clampCol(ec+1, len(last))]))
+	return strings.Join(parts, "\n")
+}
+
+// highlightLine renders a plain line with runes [a,b) shown reversed.
+func highlightLine(line string, a, b int) string {
+	r := []rune(line)
+	a, b = clampCol(a, len(r)), clampCol(b, len(r))
+	if a > b {
+		a = b
+	}
+	return string(r[:a]) + lipgloss.NewStyle().Reverse(true).Render(string(r[a:b])) + string(r[b:])
 }
 
 var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
@@ -521,8 +587,9 @@ func (m *chatModel) submit() (tea.Model, tea.Cmd) {
 
 	m.add("you", val)
 	m.thinking = true
+	m.thinkStart = time.Now()
 	m.layout()
-	return m, sendCmd(m.deps.Agent, val)
+	return m, tea.Batch(sendCmd(m.deps.Agent, val), spinnerTick())
 }
 
 func sendCmd(a *agent.Agent, input string) tea.Cmd {
@@ -613,7 +680,7 @@ func (m *chatModel) historyNext() {
 
 var baseCommands = []suggestion{
 	{"/help", "show commands"},
-	{"/todos", "list tasks"},
+	{"/todo", "/todo [all|<status>] [hoy|ayer] — list tasks grouped by status"},
 	{"/task", "/task <id> — show a task in full"},
 	{"/new", "/new <TYPE> <title> — create a task (no LLM)"},
 	{"/status", "/status <id> <status> — change a task status"},
@@ -666,8 +733,8 @@ func (m *chatModel) runCommand(val string) tea.Cmd {
 		m.deps.Agent.Reset()
 		m.add("sys", "conversation cleared.")
 
-	case "/todos":
-		m.showTodos(ctx)
+	case "/todo", "/todos":
+		m.showTodo(ctx, fields)
 
 	case "/task":
 		if len(fields) < 2 {
@@ -845,38 +912,120 @@ func (m *chatModel) report(prefix, out string, err error) {
 	m.add("sys", prefix+out)
 }
 
-func (m *chatModel) showTodos(ctx context.Context) {
-	tasks, err := m.deps.Store.List(ctx, store.Filter{})
+// todoFlags are the first-argument options for /todo; todoDayFlags the second.
+var todoFlags = []string{"all", "in_progress", "todo", "done", "blocked", "postponed", "rejected", "cancelled", "backlog"}
+var todoDayFlags = []string{"hoy", "ayer"}
+
+// showTodo lists tasks. Bare: in-progress (any day) plus today's todo/done.
+// "all" lists everything; a status flag lists that status; an optional day flag
+// (hoy/ayer/YYYY-MM-DD) narrows to that calendar day.
+func (m *chatModel) showTodo(ctx context.Context, fields []string) {
+	var tasks []domain.Task
+	var err error
+	title := "todo"
+
+	switch {
+	case len(fields) == 1:
+		title = "todo · en progreso + hoy"
+		tasks, err = m.defaultTodo(ctx)
+	case fields[1] == "all":
+		f := store.Filter{}
+		if d, ok := dayArg(fields[2:]); ok {
+			f.Day = d
+			title = "todo · all · " + fields[2]
+		} else {
+			title = "todo · all"
+		}
+		tasks, err = m.deps.Store.List(ctx, f)
+	default:
+		status := domain.Status(fields[1])
+		if !status.Valid() {
+			m.add("err", "unknown flag "+fields[1]+" — use: all or a status ("+strings.Join(todoFlags[1:], ", ")+")")
+			return
+		}
+		f := store.Filter{Status: status}
+		title = "todo · " + fields[1]
+		if d, ok := dayArg(fields[2:]); ok {
+			f.Day = d
+			title += " · " + fields[2]
+		}
+		tasks, err = m.deps.Store.List(ctx, f)
+	}
 	if err != nil {
 		m.add("err", err.Error())
 		return
 	}
+	m.renderTodo(title, tasks)
+}
+
+// defaultTodo is the bare /todo set: every in-progress task plus today's todo
+// and done tasks.
+func (m *chatModel) defaultTodo(ctx context.Context) ([]domain.Task, error) {
+	today := time.Now()
+	var out []domain.Task
+	for _, f := range []store.Filter{
+		{Status: domain.StatusInProgress},
+		{Status: domain.StatusTodo, Day: today},
+		{Status: domain.StatusDone, Day: today},
+	} {
+		ts, err := m.deps.Store.List(ctx, f)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ts...)
+	}
+	return out, nil
+}
+
+// dayArg parses an optional day flag, reporting whether one was present.
+func dayArg(rest []string) (time.Time, bool) {
+	if len(rest) > 0 {
+		if d, ok := parseDay(rest[0]); ok {
+			return d, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// renderTodo prints tasks grouped by status in workflow order.
+func (m *chatModel) renderTodo(title string, tasks []domain.Task) {
 	if len(tasks) == 0 {
-		m.add("sys", "no tasks yet.")
+		m.add("sys", "no tasks.")
 		return
 	}
 	typeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111"))
 	idStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
-
-	var b strings.Builder
-	b.WriteString(botLabel.Render(fmt.Sprintf("todos · %d", len(tasks))) + "\n\n")
-	for _, t := range tasks {
-		st := statusStyleFor(t.Status)
-		line := fmt.Sprintf("%s %s  %s  %-40s  %s",
-			st.Render("●"),
-			idStyle.Render(fmt.Sprintf("%3d", t.ID)),
-			typeStyle.Render(fmt.Sprintf("%-6s", t.Type)),
-			trunc(t.Title, 40),
-			st.Render(string(t.Status)))
-		switch {
-		case t.WorkItemSeq > 0:
-			line += helpStyle.Render(fmt.Sprintf("  #%d", t.WorkItemSeq))
-		case t.WorkItemID != "":
-			line += helpStyle.Render("  ⇅")
-		}
-		b.WriteString(line + "\n")
+	order := []domain.Status{
+		domain.StatusInProgress, domain.StatusTodo, domain.StatusBlocked,
+		domain.StatusPostponed, domain.StatusRejected, domain.StatusDone,
+		domain.StatusBacklog, domain.StatusCancelled,
 	}
-	b.WriteString("\n" + helpStyle.Render("/task <id> for detail · /drop <id> [sync] to remove"))
+	var b strings.Builder
+	b.WriteString(botLabel.Render(fmt.Sprintf("%s · %d", title, len(tasks))) + "\n")
+	for _, st := range order {
+		var lines []string
+		for _, t := range tasks {
+			if t.Status != st {
+				continue
+			}
+			line := fmt.Sprintf("%s  %s  %s",
+				idStyle.Render(fmt.Sprintf("%3d", t.ID)),
+				typeStyle.Render(fmt.Sprintf("%-6s", t.Type)),
+				trunc(t.Title, 44))
+			if t.WorkItemSeq > 0 {
+				line += helpStyle.Render(fmt.Sprintf("  #%d", t.WorkItemSeq))
+			}
+			lines = append(lines, line)
+		}
+		if len(lines) == 0 {
+			continue
+		}
+		b.WriteString("\n" + statusStyleFor(st).Render("● "+string(st)) + "\n")
+		for _, ln := range lines {
+			b.WriteString("  " + ln + "\n")
+		}
+	}
+	b.WriteString("\n" + helpStyle.Render("/todo all · /todo <status> [hoy|ayer] · /task <id>"))
 	m.add("raw", strings.TrimRight(b.String(), "\n"))
 }
 
@@ -1043,10 +1192,11 @@ func (m *chatModel) generateDailyCmd(ctx context.Context, day time.Time, instruc
 		}
 	}
 	m.thinking = true
+	m.thinkStart = time.Now()
 	m.add("sys", "generating daily for "+date+"…")
 	m.layout()
 	userMsg := serializeTasksForDaily(date, tasks, prior, instruction)
-	return dailyCmd(m.deps.Agent, dateKey, userMsg, buildDaily(date, tasks))
+	return tea.Batch(dailyCmd(m.deps.Agent, dateKey, userMsg, buildDaily(date, tasks)), spinnerTick())
 }
 
 func dailyCmd(a *agent.Agent, dateKey, userMsg, fallback string) tea.Cmd {
@@ -1580,6 +1730,26 @@ func computeSuggestions(val string, providers []string) []suggestion {
 				out = append(out, c)
 			}
 		}
+	case fields[0] == "/todo":
+		switch {
+		case completingArg(fields, endsSpace): // first arg: all|<status>
+			prefix := argPrefix(fields)
+			for _, f := range todoFlags {
+				if strings.HasPrefix(f, prefix) {
+					out = append(out, suggestion{"/todo " + f, "list " + f})
+				}
+			}
+		case (len(fields) == 2 && endsSpace) || (len(fields) == 3 && !endsSpace): // second arg: day
+			prefix := ""
+			if len(fields) == 3 {
+				prefix = fields[2]
+			}
+			for _, d := range todoDayFlags {
+				if strings.HasPrefix(d, prefix) {
+					out = append(out, suggestion{"/todo " + fields[1] + " " + d, "day: " + d})
+				}
+			}
+		}
 	case fields[0] == "/model":
 		if !completingArg(fields, endsSpace) {
 			break
@@ -1699,10 +1869,17 @@ func (m *chatModel) setContent() {
 	m.contentLines = strings.Split(ansiStrip(content), "\n") // same line count
 
 	if m.selActive && len(styled) > 0 {
-		a, b := m.selRange()
-		sel := lipgloss.NewStyle().Reverse(true).Width(w)
-		for i := a; i <= b && i < len(styled); i++ {
-			styled[i] = sel.Render(m.contentLines[i])
+		sl, sc, el, ec := m.orderedSel()
+		for i := sl; i <= el && i < len(styled); i++ {
+			r := []rune(m.contentLines[i])
+			a, b := 0, len(r)
+			if i == sl {
+				a = clampCol(sc, len(r))
+			}
+			if i == el {
+				b = clampCol(ec+1, len(r))
+			}
+			styled[i] = highlightLine(m.contentLines[i], a, b)
 		}
 		m.vp.SetContent(strings.Join(styled, "\n"))
 		return
@@ -1776,9 +1953,10 @@ func (m *chatModel) footer() string {
 		return thinkStyle.Render("press ctrl+c again to quit")
 	}
 	if m.thinking {
-		return thinkStyle.Render("⏳ thinking…")
+		frame := spinnerFrames[m.spinner%len(spinnerFrames)]
+		return thinkStyle.Render(fmt.Sprintf("%s thinking… %ds", frame, int(time.Since(m.thinkStart).Seconds())))
 	}
-	return helpStyle.Render("enter send · alt+enter newline · ↑/↓ history · pgup/pgdn/wheel scroll · drag=select+copy · / commands · ctrl+c quit")
+	return helpStyle.Render("enter send · alt+enter newline · pgup/pgdn/wheel scroll · drag select · right-click copy · esc cancel · ctrl+l clear · ctrl+c quit")
 }
 
 func (m *chatModel) statusBar() string {

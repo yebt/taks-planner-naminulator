@@ -19,9 +19,11 @@ func TestComputeSuggestions(t *testing.T) {
 	}{
 		{"", nil},
 		{"hola", nil},
-		{"/", []string{"/help", "/todos", "/task", "/new", "/status", "/state", "/drop", "/model", "/fav", "/key"}}, // capped at 10
+		{"/", []string{"/help", "/todo", "/task", "/new", "/status", "/state", "/drop", "/model", "/fav", "/key"}}, // capped at 10
 		{"/d", []string{"/drop", "/daily", "/dailies"}},
-		{"/t", []string{"/todos", "/task"}},
+		{"/t", []string{"/todo", "/task"}},
+		{"/todo ", []string{"/todo all", "/todo in_progress", "/todo todo", "/todo done", "/todo blocked", "/todo postponed", "/todo rejected", "/todo cancelled", "/todo backlog"}},
+		{"/todo done ", []string{"/todo done hoy", "/todo done ayer"}},
 		{"/re", []string{"/recall", "/remember", "/resume"}},
 		{"/rem", []string{"/remember"}},
 		{"/c", []string{"/chats", "/clear"}},

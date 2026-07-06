@@ -100,6 +100,29 @@ func TestKeySavesToConfig(t *testing.T) {
 	}
 }
 
+// drive runs a command to completion, unwrapping a tea.Batch and ignoring
+// spinner ticks, feeding the meaningful message(s) back into the model.
+func drive(m *chatModel, cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	switch msg := cmd().(type) {
+	case tea.BatchMsg:
+		for _, c := range msg {
+			if c == nil {
+				continue
+			}
+			if sub := c(); sub != nil {
+				if _, isTick := sub.(tickMsg); !isTick {
+					m.Update(sub)
+				}
+			}
+		}
+	default:
+		m.Update(msg)
+	}
+}
+
 // toolProvider emits a create_task tool call on the first turn, then a reply.
 type toolProvider struct{ calls int }
 
@@ -122,7 +145,7 @@ func TestToolEventShowsLabel(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected a command from submit")
 	}
-	m.Update(cmd()) // run the agent turn, then feed the reply back
+	drive(m, cmd) // run the agent turn (unwrapping the spinner batch), feed the reply back
 
 	found := false
 	for _, e := range m.entries {

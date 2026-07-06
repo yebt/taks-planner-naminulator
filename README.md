@@ -88,21 +88,26 @@ activity-template details (objective, acceptance criteria, etc.).
 | `alt+enter`             | newline (multi-line input)                        |
 | `↑` / `↓`               | recall input history (single-line)                |
 | `pgup` / `pgdn` / wheel | scroll the conversation                           |
-| click + drag            | select lines; on release they copy to clipboard   |
+| click + drag            | select text (character-granular)                  |
+| right-click             | copy the current selection to the clipboard       |
+| `esc`                   | cancel a selection / close the suggestion menu    |
+| `ctrl+l`                | clear the on-screen content (keeps context)       |
 | `tab` / `enter`         | complete a highlighted suggestion                 |
-| `esc`                   | close the suggestion menu / cancel                |
 | `ctrl+c`                | once clears the prompt, twice quits               |
 | `y` / `n`               | confirm / cancel a pending destructive action     |
 
 Selection is anchored to the conversation content, so you can scroll while
-selecting and the range is preserved beyond what's visible; releasing the mouse
-copies the selected lines to the system clipboard and shows a confirmation.
+selecting and the range is preserved beyond what's visible. It does not copy on
+release: **right-click** copies the highlighted text (with a confirmation toast),
+and any key (or `esc`) cancels it.
 
 ### Commands
 
 **Tasks**
 
-- `/todos` — list tasks (colored by status, with the Plane code)
+- `/todo [all|<status>] [hoy|ayer]` — list tasks grouped by status. Bare shows
+  in-progress (any day) plus today's todo/done; `all` lists everything; a status
+  flag filters, and an optional day flag narrows to that day
 - `/task <id>` — show one task in full (template sections, dates, priority)
 - `/new <TYPE> <title>` — create a task without the LLM
 - `/status <id> <status>` — change status (`todo`, `in_progress`, `blocked`,

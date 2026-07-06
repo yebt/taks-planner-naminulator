@@ -9,14 +9,38 @@ func TestAnsiStrip(t *testing.T) {
 	}
 }
 
-func TestSelectedText(t *testing.T) {
-	m := &chatModel{contentLines: []string{"line0", "line1", "line2", "line3"}}
-	m.selStart, m.selEnd = 2, 1 // reversed range should normalize
-	if got := m.selectedText(); got != "line1\nline2" {
-		t.Fatalf("selectedText = %q", got)
+func TestSelectedTextSingleLine(t *testing.T) {
+	m := &chatModel{contentLines: []string{"hello world"}}
+	m.selSL, m.selSC = 0, 6 // "world" (cols 6..10 inclusive)
+	m.selEL, m.selEC = 0, 10
+	if got := m.selectedText(); got != "world" {
+		t.Fatalf("single-line select = %q", got)
 	}
-	m.selStart, m.selEnd = 0, 99 // clamps to available lines
-	if got := m.selectedText(); got != "line0\nline1\nline2\nline3" {
-		t.Fatalf("clamped selectedText = %q", got)
+	// reversed endpoints must normalize to the same result
+	m.selSL, m.selSC = 0, 10
+	m.selEL, m.selEC = 0, 6
+	if got := m.selectedText(); got != "world" {
+		t.Fatalf("reversed select = %q", got)
+	}
+}
+
+func TestSelectedTextMultiLine(t *testing.T) {
+	m := &chatModel{contentLines: []string{"foobar", "middle", "bazqux"}}
+	m.selSL, m.selSC = 0, 3 // from "bar"
+	m.selEL, m.selEC = 2, 2 // to "baz"
+	if got := m.selectedText(); got != "bar\nmiddle\nbaz" {
+		t.Fatalf("multi-line select = %q", got)
+	}
+}
+
+func TestHighlightLine(t *testing.T) {
+	// Text content must be preserved regardless of the terminal color profile
+	// (lipgloss strips styling when stdout is not a TTY, e.g. under `go test`).
+	if got := ansiStrip(highlightLine("hello world", 6, 11)); got != "hello world" {
+		t.Fatalf("highlight changed text: %q", got)
+	}
+	// Out-of-range columns must not panic and must keep the text.
+	if got := ansiStrip(highlightLine("hi", 0, 99)); got != "hi" {
+		t.Fatalf("clamped highlight = %q", got)
 	}
 }
