@@ -67,6 +67,29 @@ func (s *SQLite) migrate() error {
   note    TEXT    NOT NULL DEFAULT ''
 );`,
 		`CREATE INDEX IF NOT EXISTS idx_activity_at ON activity(at);`,
+		`CREATE TABLE IF NOT EXISTS projects (
+  slug        TEXT    PRIMARY KEY COLLATE NOCASE,
+  name        TEXT    NOT NULL DEFAULT '',
+  description TEXT    NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);`,
+		`CREATE TABLE IF NOT EXISTS people (
+  nick       TEXT    PRIMARY KEY COLLATE NOCASE,
+  name       TEXT    NOT NULL DEFAULT '',
+  role       TEXT    NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);`,
+		`CREATE TABLE IF NOT EXISTS notes (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject_kind TEXT    NOT NULL,
+  subject_id   TEXT    NOT NULL,
+  at           INTEGER NOT NULL,
+  kind         TEXT    NOT NULL DEFAULT '',
+  text         TEXT    NOT NULL DEFAULT ''
+);`,
+		`CREATE INDEX IF NOT EXISTS idx_notes_subject ON notes(subject_kind, subject_id);`,
 		`CREATE TABLE IF NOT EXISTS dailies (
   date       TEXT    PRIMARY KEY,
   content    TEXT    NOT NULL DEFAULT '',

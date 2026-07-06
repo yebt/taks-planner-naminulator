@@ -45,6 +45,20 @@ type ActivityStore interface {
 	ActivityForTask(ctx context.Context, taskID int64) ([]Activity, error)
 }
 
+// ContextStore persists projects and people (referenced as +slug / @nick) and
+// their accumulated notes, so the agent can recall context about them.
+type ContextStore interface {
+	UpsertProject(ctx context.Context, p domain.Project) (domain.Project, error)
+	GetProject(ctx context.Context, slug string) (domain.Project, error)
+	ListProjects(ctx context.Context) ([]domain.Project, error)
+	AddProjectNote(ctx context.Context, slug, kind, text string) error
+
+	UpsertPerson(ctx context.Context, p domain.Person) (domain.Person, error)
+	GetPerson(ctx context.Context, nick string) (domain.Person, error)
+	ListPeople(ctx context.Context) ([]domain.Person, error)
+	AddPersonNote(ctx context.Context, nick, kind, text string) error
+}
+
 // TaskStore is the persistence port.
 type TaskStore interface {
 	Create(ctx context.Context, t domain.Task) (domain.Task, error)
