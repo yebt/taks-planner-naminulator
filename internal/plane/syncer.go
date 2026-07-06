@@ -133,13 +133,18 @@ func (s *Syncer) Push(ctx context.Context, t *domain.Task) error {
 		}
 		t.WorkItemID = ref.ID
 		t.WorkItemSeq = ref.Seq
-		// Rename now that the code exists so the title reads "[TYPE] - #343 - …".
-		if ref.Seq > 0 {
-			if err := s.client.UpdateIssue(ctx, ref.ID, IssueInput{Name: t.DisplayTitle()}); err != nil {
-				return err
-			}
+		// Persist the link BEFORE the rename: the work item already exists, so if
+		// the rename fails we must not forget its id — otherwise the next push
+		// would create a duplicate work item.
+		if err := s.store.Update(ctx, *t); err != nil {
+			return err
 		}
-	} else if err := s.client.UpdateIssue(ctx, t.WorkItemID, s.issueInput(ctx, t)); err != nil {
+		if ref.Seq > 0 {
+			return s.client.UpdateIssue(ctx, ref.ID, IssueInput{Name: t.DisplayTitle()})
+		}
+		return nil
+	}
+	if err := s.client.UpdateIssue(ctx, t.WorkItemID, s.issueInput(ctx, t)); err != nil {
 		return err
 	}
 	return s.store.Update(ctx, *t)

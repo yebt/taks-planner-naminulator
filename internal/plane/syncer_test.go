@@ -135,6 +135,38 @@ func TestSyncerPushMapsStatusToGroupDefault(t *testing.T) {
 	}
 }
 
+func TestSyncerPushPersistsIDBeforeRename(t *testing.T) {
+	// The create succeeds but the rename PATCH fails. The work item id MUST still
+	// be persisted, or a retry would create a duplicate work item.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Write([]byte(`{"results":[]}`))
+		case http.MethodPatch:
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`boom`))
+		default: // create
+			w.Write([]byte(`{"id":"wi-2","sequence_id":5}`))
+		}
+	}))
+	defer srv.Close()
+
+	st, _ := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	defer st.Close()
+	created, _ := st.Create(context.Background(), domain.Task{
+		Label: "a", Type: domain.TypeFeat, Title: "X", Status: domain.StatusUnstarted,
+	})
+
+	sy := NewSyncer(testClient(srv.URL), st, nil)
+	if err := sy.Push(context.Background(), &created); err == nil {
+		t.Fatal("expected the rename failure to surface")
+	}
+	got, _ := st.Get(context.Background(), created.ID)
+	if got.WorkItemID != "wi-2" {
+		t.Fatalf("work item id must be persisted despite rename failure, got %q", got.WorkItemID)
+	}
+}
+
 func TestSyncerNotConfigured(t *testing.T) {
 	sy := NewSyncer(New(Config{BaseURL: "x"}), nil, nil) // missing token/slug/project
 	if sy.Configured() {

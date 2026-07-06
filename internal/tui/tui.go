@@ -123,7 +123,6 @@ var (
 	youLabel  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
 	botLabel  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
 	sysStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Italic(true)
-	cmdStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("213"))
 	errStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
 	warnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
@@ -138,7 +137,6 @@ var (
 	toolStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("108"))
 	dividerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	userBubbleBG = lipgloss.Color("236")
-	inputBG      = lipgloss.Color("236")
 )
 
 // --- model ---
@@ -1961,16 +1959,7 @@ func (m *chatModel) layout() {
 		return
 	}
 	m.ta.SetWidth(m.width - 1)
-	// Input grows with the number of lines (slim when empty, up to 6).
-	inputH := strings.Count(m.ta.Value(), "\n") + 1
-	// if inputH < 1 {
-	// 	inputH = 1
-	// }
-	// if inputH > 6 {
-	// 	inputH = 6
-	// }
-
-	inputH = 3
+	const inputH = 3 // fixed input height (dynamic growth was reverted earlier)
 	m.ta.SetHeight(inputH)
 	// leaves room for: header + divider + input + help + status + margin
 	vpH := m.height - len(m.suggestions) - inputH - 5
