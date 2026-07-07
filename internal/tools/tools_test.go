@@ -4,11 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/webcloster-dev/planner/internal/store"
 )
+
+type fakeTelegram struct {
+	sent       string
+	configured bool
+}
+
+func (f *fakeTelegram) Configured() bool { return f.configured }
+func (f *fakeTelegram) Send(_ context.Context, text string) error {
+	f.sent = text
+	return nil
+}
 
 func newReg(t *testing.T) *Registry {
 	t.Helper()
@@ -245,6 +257,57 @@ func TestCreateWithProject(t *testing.T) {
 	tk, _ := r.store.Get(ctx, v.ID)
 	if tk.Project != "liquida" {
 		t.Fatalf("project not persisted: %+v", tk)
+	}
+}
+
+func TestDailyTools(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	r := New(st)
+	r.SetActivity(st)
+	r.SetDailies(st)
+	tg := &fakeTelegram{configured: true}
+	r.SetTelegram(tg)
+
+	if _, err := r.Dispatch(ctx, "save_daily", `{"date":"2026-07-07","content":"Daily:  2026-07-07\n\nTrabajo:\n  + x"}`); err != nil {
+		t.Fatal(err)
+	}
+	out, err := r.Dispatch(ctx, "get_daily", `{"date":"2026-07-07"}`)
+	if err != nil || !strings.Contains(out, "Trabajo") {
+		t.Fatalf("get_daily: %s (%v)", out, err)
+	}
+	if _, err := r.Dispatch(ctx, "send_daily", `{"date":"2026-07-07"}`); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(tg.sent, "Trabajo") {
+		t.Fatalf("telegram did not receive the daily: %q", tg.sent)
+	}
+	if _, err := r.Dispatch(ctx, "send_daily", `{"date":"1999-01-01"}`); err == nil {
+		t.Fatal("sending a missing daily should error")
+	}
+
+	// telegram unconfigured → send errors
+	r2 := New(st)
+	r2.SetDailies(st)
+	r2.SetTelegram(&fakeTelegram{configured: false})
+	if _, err := r2.Dispatch(ctx, "send_daily", `{"date":"2026-07-07"}`); err == nil {
+		t.Fatal("send with unconfigured telegram should error")
+	}
+
+	// list_day_tasks includes tasks worked today (create logs activity)
+	_, _ = r.Dispatch(ctx, "create_task", `{"type":"feat","title":"Worked today"}`)
+	lt, err := r.Dispatch(ctx, "list_day_tasks", `{"day":"today"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var views []taskView
+	_ = json.Unmarshal([]byte(lt), &views)
+	if len(views) == 0 {
+		t.Fatalf("list_day_tasks should include today's task: %s", lt)
 	}
 }
 

@@ -141,6 +141,11 @@ start/due dates (defaulting to today / tomorrow).
 - `/daily send [date]` — send the draft to Telegram
 - `/dailies` — list stored dailies
 
+You can also drive dailies **in conversation**: the agent has tools to gather a
+day's tasks, write/edit the digest, and send it — e.g. "armá el daily de hoy
+incluyendo las tareas de ayer", "agregá que quedó pendiente el deploy",
+"mostrámelo", "mandalo por Telegram".
+
 **LLM / providers**
 
 - `/model [name]` — switch the active provider

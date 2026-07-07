@@ -765,6 +765,10 @@ func (m *chatModel) renderToolEvents() {
 			m.add("tool", "+ "+tag)
 		case "add_project_note", "add_person_note":
 			m.add("tool", "~ note "+tag)
+		case "save_daily":
+			m.add("tool", "~ daily "+tag)
+		case "send_daily":
+			m.add("tool", "✈ daily "+tag+" sent")
 		default:
 			m.add("tool", "· "+ev.Name)
 		}

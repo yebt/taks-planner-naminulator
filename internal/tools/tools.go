@@ -23,6 +23,12 @@ type Syncer interface {
 	PullStates(ctx context.Context) (int, error)
 }
 
+// TelegramSender delivers a daily to Telegram. Implemented by internal/telegram.
+type TelegramSender interface {
+	Configured() bool
+	Send(ctx context.Context, text string) error
+}
+
 // Registry wires the tool set to a task store, long-term memory, and Plane sync.
 type Registry struct {
 	store    store.TaskStore
@@ -30,6 +36,8 @@ type Registry struct {
 	sync     Syncer
 	activity store.ActivityStore
 	ctxStore store.ContextStore
+	dailies  store.DailyStore
+	tg       TelegramSender
 }
 
 // New builds a tool registry over a store.
@@ -48,6 +56,14 @@ func (r *Registry) SetActivity(a store.ActivityStore) { r.activity = a }
 func (r *Registry) SetContext(c store.ContextStore) { r.ctxStore = c }
 
 func (r *Registry) ctxEnabled() bool { return r.ctxStore != nil }
+
+// SetDailies enables the daily tools (build/get/send a work-day summary).
+func (r *Registry) SetDailies(d store.DailyStore) { r.dailies = d }
+
+// SetTelegram lets the send_daily tool deliver to Telegram.
+func (r *Registry) SetTelegram(t TelegramSender) { r.tg = t }
+
+func (r *Registry) dailiesEnabled() bool { return r.dailies != nil }
 
 // logActivity best-effort records a task interaction (never fails the op).
 func (r *Registry) logActivity(ctx context.Context, taskID int64, kind, note string) {
@@ -189,6 +205,35 @@ func (r *Registry) Definitions() []llm.Tool {
 			},
 		)
 	}
+	if r.dailiesEnabled() {
+		defs = append(defs,
+			llm.Tool{
+				Name:        "list_day_tasks",
+				Description: "List the tasks worked on a given day (material to write a daily). Call once per day when combining several.",
+				Parameters: obj(props{
+					"day": strProp("today | yesterday | hoy | ayer | YYYY-MM-DD (default today)"),
+				}),
+			},
+			llm.Tool{
+				Name:        "save_daily",
+				Description: "Store the daily digest you wrote for a date (creates or overwrites it).",
+				Parameters: obj(props{
+					"date":    strProp("today | yesterday | YYYY-MM-DD"),
+					"content": strProp("The full daily text you composed"),
+				}, "date", "content"),
+			},
+			llm.Tool{
+				Name:        "get_daily",
+				Description: "Read back the stored daily for a date (to show or edit it).",
+				Parameters:  obj(props{"date": strProp("today | yesterday | YYYY-MM-DD")}, "date"),
+			},
+			llm.Tool{
+				Name:        "send_daily",
+				Description: "Send the stored daily for a date to Telegram. Only when the user asks.",
+				Parameters:  obj(props{"date": strProp("today | yesterday | YYYY-MM-DD")}, "date"),
+			},
+		)
+	}
 	return defs
 }
 
@@ -219,9 +264,97 @@ func (r *Registry) Dispatch(ctx context.Context, name, args string) (string, err
 		return r.upsertPerson(ctx, args)
 	case "add_person_note":
 		return r.addPersonNote(ctx, args)
+	case "list_day_tasks":
+		return r.listDayTasks(ctx, args)
+	case "save_daily":
+		return r.saveDaily(ctx, args)
+	case "get_daily":
+		return r.getDaily(ctx, args)
+	case "send_daily":
+		return r.sendDaily(ctx, args)
 	default:
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
+}
+
+// dayFrom resolves today/yesterday (es/en) or an explicit YYYY-MM-DD.
+func dayFrom(s string) time.Time {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "today", "hoy":
+		return time.Now()
+	case "yesterday", "ayer":
+		return time.Now().AddDate(0, 0, -1)
+	}
+	if t, err := time.Parse("2006-01-02", strings.TrimSpace(s)); err == nil {
+		return t
+	}
+	return time.Now()
+}
+
+func (r *Registry) listDayTasks(ctx context.Context, args string) (string, error) {
+	var in struct {
+		Day string `json:"day"`
+	}
+	_ = json.Unmarshal([]byte(orEmptyObj(args)), &in)
+	day := dayFrom(in.Day)
+	var tasks []domain.Task
+	var err error
+	if r.activity != nil {
+		tasks, err = r.activity.TasksWithActivityOn(ctx, day)
+	} else {
+		tasks, err = r.store.List(ctx, store.Filter{Day: day})
+	}
+	if err != nil {
+		return "", err
+	}
+	views := make([]taskView, 0, len(tasks))
+	for _, t := range tasks {
+		views = append(views, view(t))
+	}
+	return marshal(views)
+}
+
+func (r *Registry) saveDaily(ctx context.Context, args string) (string, error) {
+	var in struct{ Date, Content string }
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("save_daily: bad args: %w", err)
+	}
+	if strings.TrimSpace(in.Content) == "" {
+		return "", fmt.Errorf("save_daily: content is required")
+	}
+	key := dayFrom(in.Date).Format("2006-01-02")
+	if err := r.dailies.SaveDaily(ctx, key, in.Content); err != nil {
+		return "", err
+	}
+	return marshal(map[string]any{"label": key})
+}
+
+func (r *Registry) getDaily(ctx context.Context, args string) (string, error) {
+	var in struct{ Date string }
+	_ = json.Unmarshal([]byte(orEmptyObj(args)), &in)
+	key := dayFrom(in.Date).Format("2006-01-02")
+	d, err := r.dailies.GetDaily(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	return marshal(map[string]any{"date": key, "content": d.Content})
+}
+
+func (r *Registry) sendDaily(ctx context.Context, args string) (string, error) {
+	if r.tg == nil || !r.tg.Configured() {
+		return "", fmt.Errorf("send_daily: Telegram not configured")
+	}
+	var in struct{ Date string }
+	_ = json.Unmarshal([]byte(orEmptyObj(args)), &in)
+	key := dayFrom(in.Date).Format("2006-01-02")
+	d, err := r.dailies.GetDaily(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("send_daily: no daily for %s", key)
+	}
+	if err := r.tg.Send(ctx, d.Content); err != nil {
+		return "", err
+	}
+	return marshal(map[string]any{"label": key})
 }
 
 func (r *Registry) upsertProject(ctx context.Context, args string) (string, error) {
