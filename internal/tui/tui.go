@@ -147,7 +147,15 @@ type entry struct {
 	text string
 }
 
+// suggestion is a menu entry. A "+project"/"@person" full is a mention (it
+// completes only the word under the cursor); anything else is a slash command
+// (it replaces the whole input). See isMention.
 type suggestion struct{ full, desc string }
+
+// isMention reports whether a suggestion completes a +project / @person token.
+func isMention(s suggestion) bool {
+	return strings.HasPrefix(s.full, "+") || strings.HasPrefix(s.full, "@")
+}
 
 // pendingConfirm is a y/n gate for a destructive action (e.g. cloud delete).
 type pendingConfirm struct {
@@ -194,6 +202,11 @@ type chatModel struct {
 	selEL, selEC int      // selection end (line, col)
 	contentLines []string // plain (ANSI-stripped) conversation lines
 	toast        string   // transient status (e.g. "copied N chars")
+
+	// mention autocomplete cache (+project / @person)
+	mentionProjects []string
+	mentionPeople   []string
+	mentionLoaded   bool
 }
 
 type replyMsg struct {
@@ -226,6 +239,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.add("err", msg.err.Error())
 		} else {
 			m.renderToolEvents()
+			m.mentionLoaded = false // the agent may have created a project/person
 			if txt := strings.TrimSpace(msg.text); txt != "" {
 				m.add("planner", txt)
 			}
@@ -389,6 +403,12 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.acceptSuggestion()
 			return m, nil
 		case "enter":
+			// A mention completes the token and keeps typing; only a ready slash
+			// command submits.
+			if isMention(m.suggestions[m.selected]) {
+				m.acceptSuggestion()
+				return m, nil
+			}
 			if completedValue(m.suggestions[m.selected]) == m.ta.Value() {
 				return m.submit()
 			}
@@ -422,7 +442,12 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.ta, cmd = m.ta.Update(msg)
-	m.suggestions = computeSuggestions(m.ta.Value(), m.providerNames())
+	val := m.ta.Value()
+	if s := computeSuggestions(val, m.providerNames()); s != nil {
+		m.suggestions = s
+	} else {
+		m.suggestions = m.mentionSuggestions(val)
+	}
 	m.selected = 0
 	m.layout()
 	return m, cmd
@@ -605,10 +630,96 @@ func (m *chatModel) submit() (tea.Model, tea.Cmd) {
 	}
 
 	m.add("you", val)
+	// The user sees the clean message; the agent also gets any +project/@person
+	// context so it drafts coherently.
+	input := val
+	if pre := m.buildMentionContext(context.Background(), val); pre != "" {
+		input = pre + "\n\n" + val
+	}
 	m.thinking = true
 	m.thinkStart = time.Now()
 	m.layout()
-	return m, tea.Batch(sendCmd(m.deps.Agent, val), spinnerTick())
+	return m, tea.Batch(sendCmd(m.deps.Agent, input), spinnerTick())
+}
+
+var mentionRe = regexp.MustCompile(`[+@][A-Za-z0-9_-]+`)
+
+// parseMentions extracts unique +project slugs and @person nicks from text.
+func parseMentions(text string) (projects, people []string) {
+	seenP, seenU := map[string]bool{}, map[string]bool{}
+	for _, tok := range mentionRe.FindAllString(text, -1) {
+		name := tok[1:]
+		key := strings.ToLower(name)
+		if tok[0] == '+' {
+			if !seenP[key] {
+				seenP[key] = true
+				projects = append(projects, name)
+			}
+		} else if !seenU[key] {
+			seenU[key] = true
+			people = append(people, name)
+		}
+	}
+	return projects, people
+}
+
+// buildMentionContext assembles a context preamble from the projects/people
+// referenced in the message, so the agent drafts coherently (e.g. it won't
+// propose a PHP login for a Go project). Returns "" when nothing is referenced.
+func (m *chatModel) buildMentionContext(ctx context.Context, text string) string {
+	if m.deps.Context == nil {
+		return ""
+	}
+	projects, people := parseMentions(text)
+	if len(projects) == 0 && len(people) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("[Contexto de menciones — usalo para redactar coherente; no lo repitas al usuario]\n")
+	for _, slug := range projects {
+		p, err := m.deps.Context.GetProject(ctx, slug)
+		if err != nil {
+			fmt.Fprintf(&b, "+%s: sin registro (podés crearlo con upsert_project si corresponde)\n", slug)
+			continue
+		}
+		b.WriteString("+" + p.Slug)
+		if p.Name != "" {
+			b.WriteString(" (" + p.Name + ")")
+		}
+		if p.Description != "" {
+			b.WriteString(": " + p.Description)
+		}
+		b.WriteString("\n")
+		for _, n := range p.Notes {
+			fmt.Fprintf(&b, "  - [%s] %s\n", n.Kind, n.Text)
+		}
+	}
+	for _, nick := range people {
+		p, err := m.deps.Context.GetPerson(ctx, nick)
+		if err != nil {
+			fmt.Fprintf(&b, "@%s: sin registro (podés crearlo con upsert_person si corresponde)\n", nick)
+			continue
+		}
+		b.WriteString("@" + p.Nick)
+		if p.Name != "" {
+			b.WriteString(" (" + p.Name + ")")
+		}
+		if p.Role != "" {
+			b.WriteString(": " + p.Role)
+		}
+		b.WriteString("\n")
+		for _, n := range p.Notes {
+			fmt.Fprintf(&b, "  - [%s] %s\n", n.Kind, n.Text)
+		}
+	}
+	if len(projects) > 0 {
+		b.WriteString("Al crear tareas para un proyecto mencionado, pasá project=<slug> en create_task y respetá su stack/decisiones.\n")
+	}
+	if m.deps.Memory != nil && m.deps.Memory.Available() {
+		b.WriteString("Podés usar recall_memory con el slug/nick para más contexto.\n")
+	}
+	b.WriteString("[fin contexto]")
+	return b.String()
 }
 
 func sendCmd(a *agent.Agent, input string) tea.Cmd {
@@ -1504,6 +1615,7 @@ func (m *chatModel) handleProject(ctx context.Context, fields []string) {
 			m.add("err", err.Error())
 			return
 		}
+		m.mentionLoaded = false
 		m.add("sys", "saved project +"+p.Slug)
 		return
 	}
@@ -1584,6 +1696,7 @@ func (m *chatModel) handlePerson(ctx context.Context, fields []string) {
 			m.add("err", err.Error())
 			return
 		}
+		m.mentionLoaded = false
 		m.add("sys", "saved person @"+p.Nick)
 		return
 	}
@@ -1693,8 +1806,12 @@ func (m *chatModel) showTask(ctx context.Context, idStr string) {
 	if t.WorkItemSeq > 0 {
 		workItem = fmt.Sprintf("#%d (%s)", t.WorkItemSeq, t.WorkItemID)
 	}
-	b.WriteString(fmt.Sprintf("- status: %s\n- priority: %s\n- state: %s\n- work item: %s\n- fechas: %s → %s\n\n",
-		t.Status, t.PlanePriority(), orDash(t.State), workItem, orDash(t.StartDate), orDash(t.DueDate)))
+	project := "—"
+	if t.Project != "" {
+		project = "+" + t.Project
+	}
+	b.WriteString(fmt.Sprintf("- status: %s\n- priority: %s\n- state: %s\n- proyecto: %s\n- work item: %s\n- fechas: %s → %s\n\n",
+		t.Status, t.PlanePriority(), orDash(t.State), project, workItem, orDash(t.StartDate), orDash(t.DueDate)))
 	b.WriteString(head.Render("Descripción") + "\n")
 	b.WriteString(wrap.Render(orDash(t.Description)) + "\n\n")
 	writeDetails(&b, head, wrap, t.Details)
@@ -2063,6 +2180,87 @@ func argPrefix(fields []string) string {
 	return ""
 }
 
+// mentionSuggestions completes a +project or @person mention being typed as the
+// last word of the message. Returns nil unless the current word starts with +/@.
+func (m *chatModel) mentionSuggestions(val string) []suggestion {
+	if m.deps.Context == nil || strings.HasPrefix(val, "/") || strings.HasSuffix(val, " ") {
+		return nil // not while typing a slash command or between words
+	}
+	tok := lastToken(val)
+	if len(tok) == 0 {
+		return nil
+	}
+	var pool []string
+	var sym byte
+	switch tok[0] {
+	case '+':
+		sym = '+'
+		pool = m.mentionList(true)
+	case '@':
+		sym = '@'
+		pool = m.mentionList(false)
+	default:
+		return nil
+	}
+	prefix := strings.ToLower(tok[1:])
+	desc := "project"
+	if sym == '@' {
+		desc = "person"
+	}
+	var out []suggestion
+	for _, name := range pool {
+		if strings.HasPrefix(strings.ToLower(name), prefix) {
+			out = append(out, suggestion{full: string(sym) + name, desc: desc})
+		}
+		if len(out) >= 10 {
+			break
+		}
+	}
+	return out
+}
+
+// mentionList returns the cached project slugs (projects=true) or person nicks,
+// loading them lazily from the context store.
+func (m *chatModel) mentionList(projects bool) []string {
+	if !m.mentionLoaded {
+		ctx := context.Background()
+		if ps, err := m.deps.Context.ListProjects(ctx); err == nil {
+			m.mentionProjects = m.mentionProjects[:0]
+			for _, p := range ps {
+				m.mentionProjects = append(m.mentionProjects, p.Slug)
+			}
+		}
+		if pp, err := m.deps.Context.ListPeople(ctx); err == nil {
+			m.mentionPeople = m.mentionPeople[:0]
+			for _, p := range pp {
+				m.mentionPeople = append(m.mentionPeople, p.Nick)
+			}
+		}
+		m.mentionLoaded = true
+	}
+	if projects {
+		return m.mentionProjects
+	}
+	return m.mentionPeople
+}
+
+// lastToken returns the final whitespace-delimited token of s ("" if s ends in
+// whitespace or is empty).
+func lastToken(s string) string {
+	if i := strings.LastIndexAny(s, " \t\n"); i >= 0 {
+		return s[i+1:]
+	}
+	return s
+}
+
+// replaceLastToken swaps the final token of val for repl, keeping the prefix.
+func replaceLastToken(val, repl string) string {
+	if i := strings.LastIndexAny(val, " \t\n"); i >= 0 {
+		return val[:i+1] + repl
+	}
+	return repl
+}
+
 func completedValue(sel suggestion) string {
 	val := sel.full
 	if len(strings.Fields(val)) > 1 {
@@ -2078,7 +2276,17 @@ func (m *chatModel) acceptSuggestion() {
 	if m.selected >= len(m.suggestions) {
 		return
 	}
-	val := completedValue(m.suggestions[m.selected])
+	sel := m.suggestions[m.selected]
+	if isMention(sel) {
+		// Replace only the word under the cursor and keep typing after it.
+		m.ta.SetValue(replaceLastToken(m.ta.Value(), sel.full) + " ")
+		m.ta.CursorEnd()
+		m.suggestions = nil
+		m.selected = 0
+		m.layout()
+		return
+	}
+	val := completedValue(sel)
 	m.ta.SetValue(val)
 	next := computeSuggestions(val, m.providerNames())
 	// If the only remaining suggestion is exactly what we just completed, the

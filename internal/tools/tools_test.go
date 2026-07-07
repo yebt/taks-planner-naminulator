@@ -230,6 +230,24 @@ func TestContextTools(t *testing.T) {
 	}
 }
 
+func TestCreateWithProject(t *testing.T) {
+	ctx := context.Background()
+	r := newReg(t)
+	out, err := r.Dispatch(ctx, "create_task", `{"type":"feat","title":"X","project":"liquida"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v taskView
+	_ = json.Unmarshal([]byte(out), &v)
+	if v.Project != "liquida" {
+		t.Fatalf("project link not set: %+v", v)
+	}
+	tk, _ := r.store.Get(ctx, v.ID)
+	if tk.Project != "liquida" {
+		t.Fatalf("project not persisted: %+v", tk)
+	}
+}
+
 func TestCreateInvalidType(t *testing.T) {
 	r := newReg(t)
 	if _, err := r.Dispatch(context.Background(), "create_task", `{"type":"nope","title":"x"}`); err == nil {

@@ -112,7 +112,7 @@ func (s *SQLite) migrate() error {
 		}
 	}
 	// Add columns introduced after the initial schema (for existing DBs).
-	for _, col := range []string{"details", "start_date", "due_date"} {
+	for _, col := range []string{"details", "start_date", "due_date", "project"} {
 		if err := s.ensureColumn("tasks", col, "TEXT NOT NULL DEFAULT ''"); err != nil {
 			return err
 		}
@@ -173,10 +173,10 @@ func (s *SQLite) Create(ctx context.Context, t domain.Task) (domain.Task, error)
 	}
 	details, _ := json.Marshal(t.Details)
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO tasks (label,type,title,description,status,state,work_item_id,created_at,updated_at,touched_at,details,start_date,due_date,work_item_seq)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO tasks (label,type,title,description,status,state,work_item_id,created_at,updated_at,touched_at,details,start_date,due_date,work_item_seq,project)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.Label, string(t.Type), t.Title, t.Description, string(t.Status), t.State, t.WorkItemID,
-		t.CreatedAt.Unix(), t.UpdatedAt.Unix(), t.TouchedAt.Unix(), string(details), t.StartDate, t.DueDate, t.WorkItemSeq)
+		t.CreatedAt.Unix(), t.UpdatedAt.Unix(), t.TouchedAt.Unix(), string(details), t.StartDate, t.DueDate, t.WorkItemSeq, t.Project)
 	if err != nil {
 		return domain.Task{}, err
 	}
@@ -188,7 +188,7 @@ func (s *SQLite) Create(ctx context.Context, t domain.Task) (domain.Task, error)
 	return t, nil
 }
 
-const selectCols = `id,label,type,title,description,status,state,work_item_id,created_at,updated_at,touched_at,details,start_date,due_date,work_item_seq`
+const selectCols = `id,label,type,title,description,status,state,work_item_id,created_at,updated_at,touched_at,details,start_date,due_date,work_item_seq,project`
 
 // Get fetches a single task by id.
 func (s *SQLite) Get(ctx context.Context, id int64) (domain.Task, error) {
@@ -244,10 +244,10 @@ func (s *SQLite) Update(ctx context.Context, t domain.Task) error {
 	now := time.Now().UTC()
 	details, _ := json.Marshal(t.Details)
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE tasks SET label=?,type=?,title=?,description=?,status=?,state=?,work_item_id=?,updated_at=?,touched_at=?,details=?,start_date=?,due_date=?,work_item_seq=?
+		`UPDATE tasks SET label=?,type=?,title=?,description=?,status=?,state=?,work_item_id=?,updated_at=?,touched_at=?,details=?,start_date=?,due_date=?,work_item_seq=?,project=?
 		 WHERE id=?`,
 		t.Label, string(t.Type), t.Title, t.Description, string(t.Status), t.State, t.WorkItemID,
-		now.Unix(), now.Unix(), string(details), t.StartDate, t.DueDate, t.WorkItemSeq, t.ID)
+		now.Unix(), now.Unix(), string(details), t.StartDate, t.DueDate, t.WorkItemSeq, t.Project, t.ID)
 	if err != nil {
 		return err
 	}
@@ -387,7 +387,7 @@ func scanRow(sc scanner) (domain.Task, error) {
 		created, updated, touched int64
 	)
 	err := sc.Scan(&t.ID, &t.Label, &typ, &t.Title, &t.Description, &status, &t.State, &t.WorkItemID,
-		&created, &updated, &touched, &details, &t.StartDate, &t.DueDate, &t.WorkItemSeq)
+		&created, &updated, &touched, &details, &t.StartDate, &t.DueDate, &t.WorkItemSeq, &t.Project)
 	if err != nil {
 		return domain.Task{}, err
 	}

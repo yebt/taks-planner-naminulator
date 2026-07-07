@@ -80,6 +80,7 @@ func (r *Registry) Definitions() []llm.Tool {
 				"status":      enumProp("Initial status — one of Plane's 5 state groups (default unstarted)", statuses()...),
 				"start_date":  strProp("Plane start date, YYYY-MM-DD (defaults to today if omitted)"),
 				"due_date":    strProp("Plane due date, YYYY-MM-DD (defaults to start_date + 1 day)"),
+				"project":     strProp("Linked project slug when the task belongs to a mentioned +project"),
 			}, "type", "title"),
 		},
 		{
@@ -331,6 +332,7 @@ func (r *Registry) createTask(ctx context.Context, args string) (string, error) 
 		Status      string `json:"status"`
 		StartDate   string `json:"start_date"`
 		DueDate     string `json:"due_date"`
+		Project     string `json:"project"`
 	}
 	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
 		return "", fmt.Errorf("create_task: bad args: %w", err)
@@ -370,7 +372,7 @@ func (r *Registry) createTask(ctx context.Context, args string) (string, error) 
 	}
 	t, err := r.store.Create(ctx, domain.Task{
 		Label: label, Type: tt, Title: in.Title, Description: in.Description, Status: status,
-		StartDate: in.StartDate, DueDate: in.DueDate,
+		StartDate: in.StartDate, DueDate: in.DueDate, Project: strings.TrimSpace(in.Project),
 	})
 	if err != nil {
 		return "", err
@@ -539,13 +541,14 @@ type taskView struct {
 	WorkItem  string `json:"work_item,omitempty"` // Plane id; empty = not synced yet
 	StartDate string `json:"start_date,omitempty"`
 	DueDate   string `json:"due_date,omitempty"`
+	Project   string `json:"project,omitempty"`
 }
 
 func view(t domain.Task) taskView {
 	return taskView{
 		ID: t.ID, Label: t.Label, Type: string(t.Type), Title: t.Title,
 		Status: string(t.Status), State: t.State, WorkItem: t.WorkItemID,
-		StartDate: t.StartDate, DueDate: t.DueDate,
+		StartDate: t.StartDate, DueDate: t.DueDate, Project: t.Project,
 	}
 }
 

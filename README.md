@@ -171,6 +171,14 @@ persists it for you with its `upsert_project` / `add_project_note` /
 `upsert_person` / `add_person_note` tools when you say things like "guardá que
 +liquida migró a PHP 8.3" or "@kari es Karime del área comercial".
 
+While typing a message, `+` autocompletes project slugs and `@` autocompletes
+person nicks (tab/enter completes the mention).
+
+When you mention a `+project` / `@person` in a message, their stored context
+(description + notes) is fed to the agent so it drafts coherently — e.g. it
+won't propose a PHP login for a Go project. Tasks the agent creates for a
+mentioned project record the link (shown in `/task`).
+
 **Session**
 
 - `/clear` — clear the on-screen conversation and agent history

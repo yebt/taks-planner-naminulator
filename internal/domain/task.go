@@ -69,6 +69,7 @@ type Task struct {
 	WorkItemSeq int    // Plane sequence id (the "#343" in LIQMSTR-343); 0 until synced
 	StartDate   string // YYYY-MM-DD (Plane start_date); required by Plane work items
 	DueDate     string // YYYY-MM-DD (Plane target_date)
+	Project     string // linked project slug (the +slug it belongs to); empty if none
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	TouchedAt   time.Time   // last interaction — drives the daily
