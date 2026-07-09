@@ -1295,22 +1295,27 @@ const dailyPrompt = `Sos un asistente que redacta el "daily" de trabajo de un de
 Escribí en español neutro-profesional, en prosa nominalizada (ej: "Identificación de anomalías en la ejecución de CRONs...", "Validación del proceso de migración...").
 No copies los títulos tal cual: reformulálos como acciones concretas y claras. No inventes tareas que no estén en la lista.
 
-Devolvé EXACTAMENTE este formato, sin texto adicional ni encabezados markdown:
+Devolvé EXACTAMENTE este formato:
 
-Daily:  <FECHA>
+**Daily:**  <FECHA>
 
-Trabajo:
-  + <una línea por cada tarea trabajada, hecha o en progreso>
+**Trabajo:**
+  - <una línea por cada tarea trabajada, hecha o en progreso>
 
-Bloqueos:
+**Bloqueos:**
   # <una línea por cada bloqueo>
 
-Notas:
+**Notas:**
   >> <observaciones o recomendaciones técnicas relevantes>
 
 Reglas:
 - Usá <FECHA> tal como te la paso.
-- Prefijos exactos: "  + ", "  # ", "  >> ".
+- Prefijos exactos: "  - ", "  # ", "  >> ".
+- Los títulos de sección van en negrita, tal cual el formato: **Daily:**, **Trabajo:**, **Bloqueos:**, **Notas:**.
+- El prefijo de Trabajo es "  - " (guion). NUNCA uses "+": queda reservado para las menciones de proyectos (+slug).
+- Rodeá con backticks toda referencia a un proyecto, documento o acción concreta (ej: ` + "`+liquida`" + `, ` + "`migración de DNS`" + `, ` + "`README.md`" + `).
+- Poné en negrita los títulos de tareas o proyectos que menciones, con **...**.
+- Poné en itálica las observaciones y comentarios (el contenido de Notas), con __...__.
 - Si una sección no tiene contenido, omitila por completo (incluyendo su título).`
 
 // handleDaily routes the /daily verbs: "edit"/"send" (optional date), otherwise
@@ -1531,10 +1536,10 @@ func (m *chatModel) resumeLast(ctx context.Context) {
 }
 
 // buildDaily is the deterministic fallback digest (used when the LLM call
-// fails): work items (+), blocks (#) and notes (>>) under the fixed layout.
+// fails): work items (-), blocks (#) and notes (>>) under the fixed layout.
 func buildDaily(date string, tasks []domain.Task) string {
 	var b strings.Builder
-	b.WriteString("Daily:  " + date + "\n")
+	b.WriteString("**Daily:**  " + date + "\n")
 	var work, notes []string
 	for _, t := range tasks {
 		if t.Status == domain.StatusCancelled {
@@ -1553,14 +1558,14 @@ func buildDaily(date string, tasks []domain.Task) string {
 		if len(items) == 0 {
 			return
 		}
-		b.WriteString("\n" + title + ":\n")
+		b.WriteString("\n**" + title + ":**\n")
 		for _, it := range items {
 			b.WriteString("  " + prefix + " " + it + "\n")
 		}
 	}
 	// The deterministic fallback fills Trabajo and Notas; Bloqueos is left to the
 	// LLM daily (there is no "blocked" status — that lives in context).
-	section("Trabajo", "+", work)
+	section("Trabajo", "-", work)
 	section("Notas", ">>", notes)
 	if len(tasks) == 0 {
 		b.WriteString("\n(sin actividad registrada hoy)")

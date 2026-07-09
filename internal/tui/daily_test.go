@@ -22,11 +22,11 @@ func TestBuildDaily(t *testing.T) {
 	}
 	out := buildDaily(date, tasks)
 	for _, want := range []string{
-		"Daily:  2026-02-02 FEB",
-		"Trabajo:",
-		"  + [FEAT] #343 Lazy loading",
-		"  + [FIX] Migración Sensei2",
-		"Notas:",
+		"**Daily:**  2026-02-02 FEB",
+		"**Trabajo:**",
+		"  - [FEAT] #343 Lazy loading",
+		"  - [FIX] Migración Sensei2",
+		"**Notas:**",
 		"  >> Usar VPN por restricción de IP",
 	} {
 		if !strings.Contains(out, want) {

@@ -41,6 +41,9 @@ func TestSend(t *testing.T) {
 	if body["chat_id"] != "-100123" || body["text"] != "hola" {
 		t.Fatalf("body: %+v", body)
 	}
+	if body["parse_mode"] != "HTML" {
+		t.Fatalf("parse_mode should be HTML, got %v", body["parse_mode"])
+	}
 	if body["message_thread_id"] != float64(42) { // numeric thread id
 		t.Fatalf("thread id not numeric: %v", body["message_thread_id"])
 	}

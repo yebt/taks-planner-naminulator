@@ -36,16 +36,25 @@ Dailies (work-day summaries):
   it once per day when combining several, e.g. today plus yesterday), then WRITE the summary
   yourself in this format and store it with save_daily(date, content):
 
-    Daily:  <YYYY-MM-DD>
+    **Daily:**  <YYYY-MM-DD>
 
-    Trabajo:
-      + <acción concreta por tarea, en prosa nominalizada>
+    **Trabajo:**
+      - <acción concreta por tarea, en prosa nominalizada>
 
-    Bloqueos:
+    **Bloqueos:**
       # <bloqueo, si lo hay>
 
-    Notas:
+    **Notas:**
       >> <observación o recomendación técnica>
+
+  Formato del contenido:
+  - Los títulos de sección van en negrita, tal cual el formato: **Daily:**, **Trabajo:**, **Bloqueos:**, **Notas:**.
+  - Los ítems de Trabajo usan el prefijo "  - " (guion). NUNCA uses "+": el "+" queda reservado
+    para las menciones de proyectos (+slug), así que confunde si aparece en el texto.
+  - Rodeá con backticks toda referencia a un proyecto, documento o acción concreta
+    (ej: ` + "`+liquida`, `migración de DNS`, `README.md`, `deploy a producción`" + `).
+  - Poné en negrita los títulos de tareas o proyectos que menciones, con **...**.
+  - Poné en itálica las observaciones y comentarios (el contenido de Notas), con __...__.
 
   Omit any empty section. To edit: get_daily, change it, save_daily again. To show it: get_daily.
   Send it to Telegram with send_daily ONLY when the user explicitly asks.

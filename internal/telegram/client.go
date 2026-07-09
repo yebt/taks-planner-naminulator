@@ -37,13 +37,17 @@ func New(token, chatID, threadID string) *Client {
 // Configured reports whether the client can send (token + chat present).
 func (c *Client) Configured() bool { return c.token != "" && c.chatID != "" }
 
-// Send posts a plain-text message (no parse_mode, so markdown syntax and
-// brackets like "[FEAT]" are delivered literally without breaking parsing).
+// Send posts a message, translating the CommonMark markup used by dailies
+// (**bold**, __italic__, `code`) to Telegram HTML so it renders formatted.
 func (c *Client) Send(ctx context.Context, text string) error {
 	if !c.Configured() {
 		return fmt.Errorf("telegram not configured")
 	}
-	body := map[string]any{"chat_id": c.chatID, "text": text}
+	body := map[string]any{
+		"chat_id":    c.chatID,
+		"text":       toHTML(text),
+		"parse_mode": "HTML",
+	}
 	if c.threadID != "" {
 		if id, err := strconv.Atoi(c.threadID); err == nil {
 			body["message_thread_id"] = id
