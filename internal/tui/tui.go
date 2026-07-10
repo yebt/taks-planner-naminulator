@@ -835,7 +835,7 @@ var baseCommands = []suggestion{
 	{"/remember", "/remember <note> — save to long-term memory"},
 	{"/sync", "push local tasks to Plane"},
 	{"/pull", "pull states from Plane"},
-	{"/daily", "/daily [date] [instr] · edit|send [date] — build/edit/send a digest"},
+	{"/daily", "/daily [date] [instr] · show|edit|send [date] — build/show/edit/send a digest"},
 	{"/dailies", "list stored dailies"},
 	{"/projects", "list projects (+slug)"},
 	{"/project", "/project <slug> · new <slug> [desc] · <slug> note [kind] <text>"},
@@ -1325,6 +1325,9 @@ func (m *chatModel) handleDaily(ctx context.Context, fields []string) tea.Cmd {
 		return m.generateDailyCmd(ctx, time.Now(), "")
 	}
 	switch fields[1] {
+	case "show":
+		m.showDaily(ctx, dailyDayArg(fields[2:]))
+		return nil
 	case "edit":
 		m.editDaily(ctx, dailyDayArg(fields[2:]))
 		return nil
@@ -1334,7 +1337,7 @@ func (m *chatModel) handleDaily(ctx context.Context, fields []string) tea.Cmd {
 	default:
 		day, ok := parseDay(fields[1])
 		if !ok {
-			m.add("err", "usage: /daily [today|yesterday|YYYY-MM-DD] [instruction] · /daily edit|send [date]")
+			m.add("err", "usage: /daily [today|yesterday|YYYY-MM-DD] [instruction] · /daily show|edit|send [date]")
 			return nil
 		}
 		return m.generateDailyCmd(ctx, day, strings.Join(fields[2:], " "))
@@ -1457,6 +1460,19 @@ func (m *chatModel) persistDaily(dateKey, content string) {
 	}
 }
 
+// showDaily prints a stored daily read-only, without regenerating it or
+// entering edit mode.
+func (m *chatModel) showDaily(ctx context.Context, day time.Time) {
+	dateKey := day.Format("2006-01-02")
+	content := m.draftFor(ctx, dateKey)
+	if strings.TrimSpace(content) == "" {
+		m.add("err", "no daily for "+dateKey+" — run /daily "+dateKey+" first")
+		return
+	}
+	m.add("raw", content)
+	m.add("sys", "daily "+dateKey+" · /daily edit "+dateKey+" to tweak · /daily send "+dateKey+" to deliver")
+}
+
 // editDaily loads a date's draft into the textarea for inline editing.
 func (m *chatModel) editDaily(ctx context.Context, day time.Time) {
 	dateKey := day.Format("2006-01-02")
@@ -1513,7 +1529,7 @@ func (m *chatModel) listDailies(ctx context.Context) {
 	for _, d := range ds {
 		b.WriteString(fmt.Sprintf("  %s   %s\n", d.Date, helpStyle.Render(d.UpdatedAt.Local().Format("15:04"))))
 	}
-	b.WriteString("\n" + helpStyle.Render("/daily <date> regenerate · /daily edit <date> · /daily send <date>"))
+	b.WriteString("\n" + helpStyle.Render("/daily show <date> · /daily edit <date> · /daily send <date> · /daily <date> regenerate"))
 	m.add("raw", strings.TrimRight(b.String(), "\n"))
 }
 

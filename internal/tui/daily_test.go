@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/webcloster-dev/planner/internal/domain"
+	"github.com/webcloster-dev/planner/internal/store"
 )
 
 func TestBuildDaily(t *testing.T) {
@@ -57,6 +59,42 @@ func TestParseDay(t *testing.T) {
 	if _, ok := parseDay("mañana-quizá"); ok {
 		t.Fatal("garbage should not parse")
 	}
+}
+
+func TestDailyShow(t *testing.T) {
+	m, st := newTestModel(t)
+	dailies := st.(store.DailyStore)
+	m.deps.Dailies = dailies
+	ctx := context.Background()
+
+	const content = "**Daily:**  2026-07-07 JUL\n\n**Trabajo:**\n  - deploy a `producción`"
+	if err := dailies.SaveDaily(ctx, "2026-07-07", content); err != nil {
+		t.Fatal(err)
+	}
+
+	m.handleDaily(ctx, []string{"/daily", "show", "2026-07-07"})
+	if !hasRawContaining(m.entries, "deploy a `producción`") {
+		t.Fatalf("show should print the stored daily verbatim; entries=%+v", m.entries)
+	}
+
+	// A missing daily errors read-only; it must NOT regenerate.
+	m.entries = nil
+	m.handleDaily(ctx, []string{"/daily", "show", "2020-01-01"})
+	if !hasRole(m.entries, "err") {
+		t.Fatalf("show of a missing daily should error; entries=%+v", m.entries)
+	}
+	if hasRole(m.entries, "raw") {
+		t.Fatalf("show of a missing daily should not print content; entries=%+v", m.entries)
+	}
+}
+
+func hasRawContaining(entries []entry, want string) bool {
+	for _, e := range entries {
+		if e.role == "raw" && strings.Contains(e.text, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBuildDailyEmpty(t *testing.T) {

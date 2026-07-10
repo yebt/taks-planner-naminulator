@@ -137,6 +137,7 @@ start/due dates (defaulting to today / tomorrow).
 - `/daily <date> [instruction]` — generate for `today`/`hoy`, `yesterday`/`ayer`,
   or `YYYY-MM-DD`; the optional instruction and any prior stored draft are fed to
   the model so previous edits are respected
+- `/daily show [date]` — print a stored daily read-only (no regeneration)
 - `/daily edit [date]` — edit the draft inline (`enter` saves, `esc` cancels)
 - `/daily send [date]` — send the draft to Telegram
 - `/dailies` — list stored dailies
