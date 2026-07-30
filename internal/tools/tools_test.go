@@ -3,11 +3,13 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/webcloster-dev/planner/internal/domain"
 	"github.com/webcloster-dev/planner/internal/store"
 )
 
@@ -21,6 +23,20 @@ func (f *fakeTelegram) Send(_ context.Context, text string) error {
 	f.sent = text
 	return nil
 }
+
+// fakeSyncer stands in for Plane: it counts pushes and returns a fixed result.
+type fakeSyncer struct {
+	configured bool
+	err        error
+	pushes     int
+}
+
+func (f *fakeSyncer) Configured() bool { return f.configured }
+func (f *fakeSyncer) Push(_ context.Context, _ *domain.Task) error {
+	f.pushes++
+	return f.err
+}
+func (f *fakeSyncer) PullStates(_ context.Context) (int, error) { return 0, nil }
 
 func newReg(t *testing.T) *Registry {
 	t.Helper()
@@ -439,6 +455,134 @@ func TestDefinitionsShape(t *testing.T) {
 		if d.Parameters["type"] != "object" {
 			t.Fatalf("tool %s params not an object schema", d.Name)
 		}
+	}
+}
+
+// rawKeys decodes a tool result as a raw JSON object so a test can assert that
+// a key is absent, not merely empty.
+func rawKeys(t *testing.T, out string) map[string]json.RawMessage {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		t.Fatalf("result is not a JSON object: %s (%v)", out, err)
+	}
+	return m
+}
+
+// newSyncReg builds a registry wired to the given syncer.
+func newSyncReg(t *testing.T, s Syncer) *Registry {
+	t.Helper()
+	r := newReg(t)
+	r.SetSyncer(s)
+	return r
+}
+
+func TestPushFailureReportedButLocalWriteSucceeds(t *testing.T) {
+	ctx := context.Background()
+	sy := &fakeSyncer{configured: true, err: errors.New("plane: 401 unauthorized")}
+	r := newSyncReg(t, sy)
+
+	out, err := r.Dispatch(ctx, "create_task", `{"type":"feat","title":"Login Screen"}`)
+	if err != nil {
+		t.Fatalf("a failed Plane push must not fail create_task: %v", err)
+	}
+	if sy.pushes != 1 {
+		t.Fatalf("expected 1 push attempt, got %d", sy.pushes)
+	}
+	var created taskView
+	if err := json.Unmarshal([]byte(out), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == 0 {
+		t.Fatalf("task should still be created locally: %s", out)
+	}
+	if _, ok := rawKeys(t, out)["sync_error"]; !ok {
+		t.Fatalf("create_task result should carry sync_error: %s", out)
+	}
+	if !strings.Contains(created.SyncError, "401 unauthorized") {
+		t.Fatalf("sync_error should carry the reason, got %q", created.SyncError)
+	}
+	// the task is really in the store, not just in the response
+	if _, err := r.store.Get(ctx, created.ID); err != nil {
+		t.Fatalf("task not persisted after a failed push: %v", err)
+	}
+
+	// not create-only: a mutating tool reports the same way
+	statusOut, err := r.Dispatch(ctx, "set_status", `{"id":`+itoa(created.ID)+`,"status":"started"}`)
+	if err != nil {
+		t.Fatalf("a failed Plane push must not fail set_status: %v", err)
+	}
+	if _, ok := rawKeys(t, statusOut)["sync_error"]; !ok {
+		t.Fatalf("set_status result should carry sync_error: %s", statusOut)
+	}
+	var updated taskView
+	_ = json.Unmarshal([]byte(statusOut), &updated)
+	if updated.Status != "started" {
+		t.Fatalf("status should still be applied locally: %+v", updated)
+	}
+	if !strings.Contains(updated.SyncError, "401 unauthorized") {
+		t.Fatalf("sync_error should carry the reason, got %q", updated.SyncError)
+	}
+	tk, err := r.store.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(tk.Status) != "started" {
+		t.Fatalf("status not persisted after a failed push: %+v", tk)
+	}
+}
+
+func TestPushSuccessOmitsSyncError(t *testing.T) {
+	ctx := context.Background()
+	sy := &fakeSyncer{configured: true}
+	r := newSyncReg(t, sy)
+
+	out, err := r.Dispatch(ctx, "create_task", `{"type":"feat","title":"X"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sy.pushes != 1 {
+		t.Fatalf("expected 1 push attempt, got %d", sy.pushes)
+	}
+	if _, ok := rawKeys(t, out)["sync_error"]; ok {
+		t.Fatalf("a successful push must not add sync_error: %s", out)
+	}
+	var created taskView
+	_ = json.Unmarshal([]byte(out), &created)
+	statusOut, err := r.Dispatch(ctx, "set_status", `{"id":`+itoa(created.ID)+`,"status":"started"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rawKeys(t, statusOut)["sync_error"]; ok {
+		t.Fatalf("a successful push must not add sync_error: %s", statusOut)
+	}
+}
+
+func TestPlaneUnconfiguredNeverPushesNorReportsSyncError(t *testing.T) {
+	ctx := context.Background()
+	// an unconfigured syncer: Push must never be attempted
+	sy := &fakeSyncer{configured: false, err: errors.New("should not be called")}
+	r := newSyncReg(t, sy)
+
+	out, err := r.Dispatch(ctx, "create_task", `{"type":"feat","title":"X"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sy.pushes != 0 {
+		t.Fatalf("unconfigured Plane must not be pushed to, got %d pushes", sy.pushes)
+	}
+	if _, ok := rawKeys(t, out)["sync_error"]; ok {
+		t.Fatalf("unconfigured Plane must not add sync_error: %s", out)
+	}
+
+	// no syncer at all behaves the same way
+	plain := newReg(t)
+	plainOut, err := plain.Dispatch(ctx, "create_task", `{"type":"feat","title":"X"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rawKeys(t, plainOut)["sync_error"]; ok {
+		t.Fatalf("no syncer must not add sync_error: %s", plainOut)
 	}
 }
 

@@ -75,11 +75,14 @@ func (r *Registry) logActivity(ctx context.Context, taskID int64, kind, note str
 func (r *Registry) memEnabled() bool { return r.mem != nil && r.mem.Available() }
 
 // pushSync best-effort pushes a task to Plane (local-first: sync errors don't
-// fail the local operation; the returned work_item reflects success).
-func (r *Registry) pushSync(ctx context.Context, t *domain.Task) {
-	if r.sync != nil && r.sync.Configured() {
-		_ = r.sync.Push(ctx, t)
+// fail the local operation; the returned work_item reflects success). The push
+// error is returned rather than discarded so the caller can report it: a silent
+// failure would let an expired token drop every task without any signal.
+func (r *Registry) pushSync(ctx context.Context, t *domain.Task) error {
+	if r.sync == nil || !r.sync.Configured() {
+		return nil
 	}
+	return r.sync.Push(ctx, t)
 }
 
 // Definitions returns the provider-agnostic tool schemas.
@@ -537,9 +540,9 @@ func (r *Registry) createTask(ctx context.Context, args string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	r.pushSync(ctx, &t)
+	syncErr := r.pushSync(ctx, &t)
 	r.logActivity(ctx, t.ID, "create", "created "+t.Label)
-	return marshal(view(t))
+	return marshal(syncedView(t, syncErr))
 }
 
 func (r *Registry) listTasks(ctx context.Context, args string) (string, error) {
@@ -580,9 +583,9 @@ func (r *Registry) setStatus(ctx context.Context, args string) (string, error) {
 	if err := r.store.Update(ctx, t); err != nil {
 		return "", err
 	}
-	r.pushSync(ctx, &t)
+	syncErr := r.pushSync(ctx, &t)
 	r.logActivity(ctx, t.ID, "status", "→ "+string(status))
-	return marshal(view(t))
+	return marshal(syncedView(t, syncErr))
 }
 
 func (r *Registry) setState(ctx context.Context, args string) (string, error) {
@@ -601,9 +604,9 @@ func (r *Registry) setState(ctx context.Context, args string) (string, error) {
 	if err := r.store.Update(ctx, t); err != nil {
 		return "", err
 	}
-	r.pushSync(ctx, &t)
+	syncErr := r.pushSync(ctx, &t)
 	r.logActivity(ctx, t.ID, "state", "state: "+in.State)
-	return marshal(view(t))
+	return marshal(syncedView(t, syncErr))
 }
 
 func (r *Registry) setDetails(ctx context.Context, args string) (string, error) {
@@ -667,9 +670,9 @@ func (r *Registry) setDetails(ctx context.Context, args string) (string, error) 
 	if err := r.store.Update(ctx, t); err != nil {
 		return "", err
 	}
-	r.pushSync(ctx, &t)
+	syncErr := r.pushSync(ctx, &t)
 	r.logActivity(ctx, t.ID, "details", "details updated")
-	return marshal(view(t))
+	return marshal(syncedView(t, syncErr))
 }
 
 func (r *Registry) dropTask(ctx context.Context, args string) (string, error) {
@@ -704,6 +707,9 @@ type taskView struct {
 	StartDate string `json:"start_date,omitempty"`
 	DueDate   string `json:"due_date,omitempty"`
 	Project   string `json:"project,omitempty"`
+	// SyncError carries why the Plane push failed. Empty (and omitted) when the
+	// push succeeded or Plane isn't configured, so the happy path is unchanged.
+	SyncError string `json:"sync_error,omitempty"`
 }
 
 func view(t domain.Task) taskView {
@@ -712,6 +718,17 @@ func view(t domain.Task) taskView {
 		Status: string(t.Status), State: t.State, WorkItem: t.WorkItemID,
 		StartDate: t.StartDate, DueDate: t.DueDate, Project: t.Project,
 	}
+}
+
+// syncedView is the view of a task that was just mutated: the local write
+// succeeded, so this is never an error result, but a failed Plane push is
+// attached so the model can tell the user the task only landed locally.
+func syncedView(t domain.Task, syncErr error) taskView {
+	v := view(t)
+	if syncErr != nil {
+		v.SyncError = syncErr.Error()
+	}
+	return v
 }
 
 // validDate checks an optional YYYY-MM-DD date.
