@@ -41,10 +41,32 @@ func (c *Client) Configured() bool { return c.token != "" && c.chatID != "" }
 
 // Send posts a message, translating the CommonMark markup used by dailies
 // (**bold**, __italic__, `code`) to Telegram HTML so it renders formatted.
+//
+// Text past Telegram's 4096-character limit is delivered as several messages in
+// order. A message that fits — the overwhelming majority — still travels as
+// exactly one request.
 func (c *Client) Send(ctx context.Context, text string) error {
 	if !c.Configured() {
 		return fmt.Errorf("telegram not configured")
 	}
+	chunks := splitForTelegram(text, maxMessageChars)
+	if len(chunks) == 1 {
+		return c.sendOne(ctx, chunks[0])
+	}
+	for i, chunk := range chunks {
+		if err := c.sendOne(ctx, chunk); err != nil {
+			// Earlier chunks are already delivered, so a generic failure would
+			// hide a half-sent daily. Say exactly where the send stopped.
+			return fmt.Errorf("sending chunk %d of %d: %w", i+1, len(chunks), err)
+		}
+	}
+	return nil
+}
+
+// sendOne posts a single message that is already known to fit. Every chunk goes
+// through here, so parse_mode, thread routing and token redaction apply to all
+// of them alike.
+func (c *Client) sendOne(ctx context.Context, text string) error {
 	body := map[string]any{
 		"chat_id":    c.chatID,
 		"text":       toHTML(text),
