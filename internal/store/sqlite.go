@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -22,8 +23,18 @@ var ErrNotFound = errors.New("task not found")
 type SQLite struct{ db *sql.DB }
 
 // OpenSQLite opens (creating if needed) the database at path.
+//
+// Two pragmas ride on the connection string so every pooled connection gets
+// them. WAL, so a reader never blocks the writer. And a busy timeout, so a
+// concurrent writer waits instead of failing instantly with SQLITE_BUSY — the
+// TUI can write from a slash command while a background agent turn is writing
+// too, and the default behaviour is to fail that second write immediately.
+//
+// Deliberately NOT SetMaxOpenConns(1): it would also remove the race, but a
+// query issued while rows are still open would then deadlock instead of
+// erroring, and a hang is a worse failure than the one being fixed.
 func OpenSQLite(path string) (*SQLite, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, err
 	}
@@ -33,6 +44,17 @@ func OpenSQLite(path string) (*SQLite, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// sqliteDSN builds the file: URI carrying the pragmas. url.URL does the
+// escaping, so a path with spaces or other odd characters cannot break out into
+// the query string.
+func sqliteDSN(path string) string {
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "journal_mode(WAL)")
+	u := url.URL{Scheme: "file", Opaque: path, RawQuery: q.Encode()}
+	return u.String()
 }
 
 func (s *SQLite) migrate() error {
