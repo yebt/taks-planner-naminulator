@@ -4,14 +4,14 @@
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 14 / 42 closed — every CRITICAL and every HIGH is done.**
+**Progress: 15 / 42 closed — every CRITICAL and every HIGH is done, plus CI.**
 [C1](#c1) ✅ [C2](#c2) ✅ [C3](#c3) ✅ · [H1](#h1) ✅ [H2](#h2) ✅ [H3](#h3) ✅
 [H4](#h4) ✅ [H5](#h5) ✅ [H6](#h6) ✅ [H7](#h7) ✅ · [M1](#m1) ✅ [M5](#m5) ✅
 [M14](#m14) ✅ · [N1](#n1) ✅
 
 What remains is MEDIUM and below: mostly structure ([M3](#m3) the `tui.go`
-split, [M12](#m12) table-driven tools), robustness ([M7](#m7) SQLite pragmas,
-[M8](#m8) duplicate Plane issues), and [M13](#m13) CI.
+split, [M12](#m12) table-driven tools) and robustness ([M7](#m7) SQLite pragmas,
+[M8](#m8) duplicate Plane issues).
 
 Suite green after every fix, `vet` and `gofmt` clean. **Every closed item ships
 with a test that was verified to fail against the old code** — reverted in place
@@ -83,7 +83,7 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | [M10](#m10) | ⬜ | MEDIUM | Agent max-steps exhaustion leaves dangling history |
 | [M11](#m11) | ⬜ | MEDIUM | `internal/tui` imports concrete adapters, duplicating wiring |
 | [M12](#m12) | ⬜ | MEDIUM | `Definitions()` / `Dispatch()` are two hand-synced registries |
-| [M13](#m13) | ⬜ | MEDIUM | No CI |
+| [M13](#m13) | ✅ | MEDIUM | No CI |
 | [M14](#m14) | ✅ | MEDIUM | `buildDaily` hardcodes "hoy" for every date |
 | [M15](#m15) | ⬜ | MEDIUM | No `list_dailies` tool — README oversells conversational parity |
 | [N1](#n1) | ✅ | MEDIUM | `persistDaily` discards the save error — "daily ready" can be a lie |
@@ -882,11 +882,40 @@ repeats the same unmarshal boilerplate (12+ times) and the mutators repeat
 
 **Fix:** one table `[]struct{Name; Schema; Handler}` generating both.
 
-### M13 — No CI {#m13}
+### M13 — No CI {#m13} ✅ DONE
 
-No `.github/`, no workflow files, no pre-commit hooks anywhere. Nothing enforces
+No `.github/`, no workflow files, no pre-commit hooks anywhere. Nothing enforced
 `go build` / `go vet` / `go test` on push. Notably, the branch is named
-`feat/rutine-repo-actions` — that intent is entirely unstarted.
+`feat/rutine-repo-actions` — that intent was entirely unstarted. It is now
+started.
+
+**Fix applied:** `.github/workflows/ci.yml`, one job on `ubuntu-latest`, on every
+push and pull request, with a `concurrency` group that cancels a run superseded
+by a newer push to the same ref.
+
+Six gates, in order: `gofmt` (fails on any unformatted file), `go build`, a
+second build with **`CGO_ENABLED=0`**, `go vet`, `go test ./... -count=1`, and
+the suite again under **`-race`**.
+
+Two of those are deliberate rather than boilerplate:
+
+- **The cgo-free build** checks a claim the README makes — a pure-Go binary via
+  modernc SQLite. An assertion in prose that nothing verifies is a wish; this
+  turns it into a gate.
+- **`-race`** because [C1b](#c1) started handing command work to goroutines. The
+  rule that `busy`'s closure must not touch model state is the kind of thing a
+  future edit breaks silently, and the race detector is the only thing that
+  catches it.
+
+The toolchain comes from `go-version-file: go.mod`, so the Go version has a
+single source of truth (see [L8](#low) on the patch-level pin — still open, and
+now consumed by CI).
+
+**Every gate was run locally before committing**, including the cgo-free build
+and the full `-race` suite, so the first CI run is not the first time anyone
+checked whether it passes.
+
+README updated to describe what CI enforces.
 
 ### M14 — `buildDaily` hardcodes "hoy" {#m14} ✅ DONE **[verified]**
 
@@ -1068,8 +1097,12 @@ Recorded so future audits don't re-litigate these:
 5. ✅ **Then [H4](#h4)** ~~(render + wrap)~~ — also fixed the selection desync.
 6. ✅ **Remaining HIGHs:** ~~[H3](#h3)~~ (long dailies chunked) and ~~[H7](#h7)~~
    (failed Plane pushes now visible) — done.
-   **← NEXT** is step 7.
-7. **Structural:** [M3](#m3) file split, [M12](#m12) table-driven tools,
+7. ✅ **[M13](#m13) CI** — moved ahead of the structural work on purpose: [M3](#m3)
+   is a ~2400-line mechanical refactor, and it should land against an automated
+   gate rather than someone remembering to run the suite.
+8. **← NEXT · Structural:** [M3](#m3) file split, [M12](#m12) table-driven tools,
    [M11](#m11) shared adapter factory. Pure refactors — land them behind the
-   tests added in steps 1–2, never before.
-8. **[M13](#m13) CI last**, so it locks in everything above.
+   tests added in steps 1–6 and the CI gate from step 7, never before.
+9. **Robustness leftovers:** [M7](#m7) SQLite pragmas, [M8](#m8) duplicate Plane
+   issues (which [M7](#m7) makes more likely), [M9](#m9), [M10](#m10),
+   [M15](#m15), then the [L1–L14](#low) cleanup and [N2](#n2).
