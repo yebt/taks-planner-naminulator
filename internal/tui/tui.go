@@ -1362,6 +1362,10 @@ func (m *chatModel) handleDaily(ctx context.Context, fields []string) tea.Cmd {
 }
 
 // parseDay resolves today/yesterday (es/en) or an explicit YYYY-MM-DD date.
+// The date is parsed in the local zone on purpose: the store derives its 24h
+// window from day.Location(), so a UTC value (what time.Parse returns) would
+// shift the window by the zone offset and make "hoy" and today's explicit date
+// select different tasks.
 func parseDay(tok string) (time.Time, bool) {
 	switch strings.ToLower(tok) {
 	case "today", "hoy":
@@ -1369,7 +1373,7 @@ func parseDay(tok string) (time.Time, bool) {
 	case "yesterday", "ayer":
 		return time.Now().AddDate(0, 0, -1), true
 	}
-	if t, err := time.Parse("2006-01-02", tok); err == nil {
+	if t, err := time.ParseInLocation("2006-01-02", tok, time.Local); err == nil {
 		return t, true
 	}
 	return time.Time{}, false
@@ -1601,7 +1605,9 @@ func buildDaily(date string, tasks []domain.Task) string {
 	section("Trabajo", "-", work)
 	section("Notas", ">>", notes)
 	if len(tasks) == 0 {
-		b.WriteString("\n(sin actividad registrada hoy)")
+		// No "hoy" here: the digest is built for whatever date was asked for,
+		// and it already carries that date in its header.
+		b.WriteString("\n(sin actividad registrada)")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

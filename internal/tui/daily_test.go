@@ -62,6 +62,36 @@ func TestParseDay(t *testing.T) {
 	}
 }
 
+// The store derives its 24h window from day.Location() (see sqlite.go), so
+// parseDay must hand back Local times on every branch. time.Parse returns UTC,
+// which silently shifted the window by the zone offset and made "hoy" and
+// today's explicit date select different tasks.
+func TestParseDayUsesLocalLocation(t *testing.T) {
+	today, ok := parseDay("hoy")
+	if !ok {
+		t.Fatal("hoy should parse")
+	}
+	explicit, ok := parseDay(time.Now().Format("2006-01-02"))
+	if !ok {
+		t.Fatal("today's explicit date should parse")
+	}
+
+	// time.Local and time.UTC are distinct Locations even on a UTC machine, so
+	// this assertion has teeth regardless of where the tests run.
+	if explicit.Location() != time.Local {
+		t.Fatalf("explicit date must be Local, got %v", explicit.Location())
+	}
+
+	// The window the store actually computes.
+	startOf := func(d time.Time) time.Time {
+		return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, d.Location())
+	}
+	if !startOf(today).Equal(startOf(explicit)) {
+		t.Fatalf("%q and today's explicit date must select the same window:\n hoy:  %v\n date: %v",
+			"hoy", startOf(today), startOf(explicit))
+	}
+}
+
 func TestDailyShow(t *testing.T) {
 	m, st := newTestModel(t)
 	dailies := st.(store.DailyStore)
