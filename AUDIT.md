@@ -4,9 +4,10 @@
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 7 / 41 closed** — [C2](#c2) ✅ · [C3](#c3) ✅ · [H1](#h1) ✅ ·
-[H2](#h2) ✅ · [H6](#h6) ✅ · [M1](#m1) ✅ · [M5](#m5) ✅ · [M14](#m14) ✅ ·
-1 new finding filed ([N1](#n1)).
+**Progress: 8 / 41 closed, 1 partial** — [C2](#c2) ✅ · [C3](#c3) ✅ ·
+[H1](#h1) ✅ · [H2](#h2) ✅ · [H6](#h6) ✅ · [M1](#m1) ✅ · [M5](#m5) ✅ ·
+[M14](#m14) ✅ · [C1a](#c1) ✅ (engram timeout) · [C1b](#c1) ⬜ deferred
+(the `runCommand` refactor) · 1 new finding filed ([N1](#n1)).
 
 Suite green after every fix, `vet` and `gofmt` clean. **Every closed item ships
 with a test that was verified to fail against the old code** — reverted in place
@@ -54,7 +55,9 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 
 | ID | St | Severity | Title |
 | -- | -- | -------- | ----- |
-| [C1](#c1) | ⬜ | CRITICAL | Slash commands block the Bubbletea event loop — unrecoverable freeze |
+| [C1](#c1) | 🔧 | CRITICAL | Slash commands block the Bubbletea event loop — unrecoverable freeze |
+| [C1a](#c1) | ✅ | — | ↳ engram shell-out had no deadline at all (worst case: no escape) |
+| [C1b](#c1) | ⬜ | — | ↳ move blocking branches of `runCommand` out of `Update()` — **deferred** |
 | [C2](#c2) | ✅ | CRITICAL | `contextmgr.Fit` can return only the system message |
 | [C3](#c3) | ✅ | CRITICAL | Daily fallback silently overwrites a hand-edited draft |
 | [H1](#h1) | ✅ | HIGH | Telegram bot token leaks on screen through `*url.Error` |
@@ -89,7 +92,7 @@ and carry an `N` prefix.
 
 ## CRITICAL
 
-### C1 — Slash commands block the Bubbletea event loop {#c1}
+### C1 — Slash commands block the Bubbletea event loop {#c1} 🔧 PARTIAL
 
 **Where:** `internal/tui/tui.go:616-643` (`submit`), `855-1041` (`runCommand`), `internal/memory/memory.go:38-40`
 
@@ -109,9 +112,57 @@ only set on the chat path) and no escape — recovery requires killing the proce
 from another terminal. `/sync`, `/pull` and `/daily send` freeze the same way for
 20–30s, bounded only by their HTTP client timeouts.
 
-**Fix:** move every blocking branch of `runCommand` into a `tea.Cmd`, give each a
-`context.WithTimeout`, and set `m.thinking` so the user sees a spinner. Add a
-timeout to `memory.defaultRun` specifically — it has no bound of any kind.
+**Split into two, deliberately.** The freeze has two independent causes and only
+one of them is a refactor:
+
+#### C1a — engram had no bound at all ✅ DONE
+
+This was the genuinely unrecoverable case. `/sync`, `/pull` and `/daily send`
+freeze for 20–30s but do eventually return, bounded by their HTTP client
+timeouts. `/recall` and `/remember` never returned, because the engram shell-out
+had no deadline of any kind — no timeout, no cancellation, nothing.
+
+**Fix applied:** the timeout lives in the `Engram` adapter, not the caller. The
+adapter is what knows the CLI can wedge, and putting it there bounds every
+present and future caller instead of relying on each one to remember. Each
+invocation runs under `context.WithTimeout(ctx, 10s)`. A zero `timeout` field
+falls back to the default, so an `Engram` built directly is bounded too.
+
+Caller cancellation is deliberately **not** relabelled as a timeout — the errors
+mean different things to whoever reads them (`errors.Is(ctx.Err(),
+context.DeadlineExceeded)` distinguishes the two).
+
+**Landed in:** `internal/memory/memory.go` (new `defaultTimeout`, `timeout`
+field, `exec` and `fail` helpers; `Save`/`Recall` route through `exec`)
+
+**Tests added** (`internal/memory/memory_test.go`), table-driven over both
+shelling operations:
+- `TestEngramTimesOutOnHungCLI` — a runner that only returns on cancellation;
+  asserts it fails, names the timeout, and returns promptly.
+- `TestEngramReportsCallerCancellationAsSuch` — cancellation is not mislabelled.
+- `TestEngramZeroTimeoutFallsBackToDefault` — a directly built `Engram` is bounded.
+
+**Teeth verified in the strongest possible form:** with the timeout removed,
+`TestEngramTimesOutOnHungCLI` does not fail — it *hangs* until the Go test
+runner kills it (`panic: test timed out after 5s`). The test reproduces the
+reported bug literally. With the fix it passes in 40ms. Existing tests were not
+modified.
+
+#### C1b — blocking branches still run inside `Update()` ⬜ DEFERRED
+
+Still open, by explicit decision — it is a refactor, not a patch, and deserves a
+dedicated session.
+
+`submit` still calls `m.runCommand(val)` inline inside `Update()` with
+`context.Background()`. `/sync`, `/pull`, `/daily send` and the other blocking
+branches still freeze the UI for the duration of their HTTP timeouts, with no
+spinner and no way to cancel.
+
+**Remaining work:** move each blocking branch into a `tea.Cmd` (the non-slash
+chat path at `tui.go:725-730` is the model to copy), give each a
+`context.WithTimeout`, and set `m.thinking` so the user sees a spinner. Fold
+[N1](#n1) into the same pass — `persistDaily` sits on the same
+`context.Background()` surface.
 
 ---
 
@@ -781,10 +832,10 @@ Recorded so future audits don't re-litigate these:
    ~~[H1](#h1)~~, ~~[M1](#m1)~~ — all done.
 2. ✅ **Correctness:** ~~[C2](#c2)~~, ~~[H2](#h2)~~, ~~[H6](#h6)~~, ~~[M5](#m5)~~,
    ~~[M14](#m14)~~ — all done.
-3. **← NEXT · Unfreeze the UI:** [C1](#c1). Larger — it touches every blocking
-   branch of `runCommand` — but it is the worst user-facing failure. Pick up
-   [N1](#n1) along the way: `persistDaily` sits on the same missing-timeout
-   surface.
+3. 🔧 **Unfreeze the UI:** [C1a](#c1) ✅ done — engram, the only unrecoverable
+   case, is now bounded. **[C1b](#c1) deferred** to a dedicated session: moving
+   the blocking branches of `runCommand` into `tea.Cmd` is a refactor, and
+   [N1](#n1) folds into that same pass.
 4. **Collapse the daily spec:** [H5](#h5) → one `internal/daily` package. Do this
    *before* [H4](#h4), since the renderer should consume the same constants.
 5. **Then [H4](#h4)** (render + wrap), which also fixes the selection desync.
