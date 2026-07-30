@@ -214,12 +214,15 @@ type replyMsg struct {
 	err  error
 }
 
-// dailyMsg carries the result of an async daily generation; fallback is the
-// deterministic digest used when the model call fails or returns nothing.
+// dailyMsg carries the result of an async daily generation. fallback is the
+// deterministic digest used when the model call fails or returns nothing, and
+// prior is the daily already stored for that day — kept so a failed generation
+// can never overwrite text the user edited by hand.
 type dailyMsg struct {
 	dateKey  string
 	text     string
 	fallback string
+	prior    string
 	err      error
 }
 
@@ -252,10 +255,24 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinking = false
 		text := strings.TrimSpace(msg.text)
 		if msg.err != nil || text == "" {
-			text = msg.fallback
+			why := "the model returned nothing"
 			if msg.err != nil {
-				m.add("sys", "LLM daily failed, using basic format: "+msg.err.Error())
+				why = msg.err.Error()
 			}
+			// A stored daily is the user's own edited text and the deterministic
+			// fallback cannot reconstruct it, so a failed generation must leave it
+			// alone. The fallback is only useful when there is nothing to lose.
+			if prior := strings.TrimSpace(msg.prior); prior != "" {
+				m.dailyDraft = prior
+				m.dailyDraftDate = msg.dateKey
+				m.add("err", "daily generation failed ("+why+") — the stored daily is untouched")
+				m.add("raw", prior)
+				m.add("sys", "daily ("+msg.dateKey+") unchanged — /daily edit to tweak, /daily send to deliver.")
+				m.layout()
+				return m, nil
+			}
+			text = msg.fallback
+			m.add("sys", "daily generation failed ("+why+"), using basic format")
 		}
 		m.dailyDraft = text
 		m.dailyDraftDate = msg.dateKey
@@ -1398,13 +1415,13 @@ func (m *chatModel) generateDailyCmd(ctx context.Context, day time.Time, instruc
 	m.add("sys", "generating daily for "+date+"…")
 	m.layout()
 	userMsg := serializeTasksForDaily(date, tasks, prior, instruction)
-	return tea.Batch(dailyCmd(m.deps.Agent, dateKey, userMsg, buildDaily(date, tasks)), spinnerTick())
+	return tea.Batch(dailyCmd(m.deps.Agent, dateKey, userMsg, buildDaily(date, tasks), prior), spinnerTick())
 }
 
-func dailyCmd(a *agent.Agent, dateKey, userMsg, fallback string) tea.Cmd {
+func dailyCmd(a *agent.Agent, dateKey, userMsg, fallback, prior string) tea.Cmd {
 	return func() tea.Msg {
 		out, err := a.Oneshot(context.Background(), dailyPrompt, userMsg)
-		return dailyMsg{dateKey: dateKey, text: out, fallback: fallback, err: err}
+		return dailyMsg{dateKey: dateKey, text: out, fallback: fallback, prior: prior, err: err}
 	}
 }
 

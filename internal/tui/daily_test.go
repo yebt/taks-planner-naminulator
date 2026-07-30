@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -85,6 +86,100 @@ func TestDailyShow(t *testing.T) {
 	}
 	if hasRole(m.entries, "raw") {
 		t.Fatalf("show of a missing daily should not print content; entries=%+v", m.entries)
+	}
+}
+
+const curatedDaily = "**Daily:**  2026-07-07 JUL\n\n**Trabajo:**\n  - lo que escribí a mano"
+
+// dailyStore wires a DailyStore into the model and returns it.
+func dailyStore(t *testing.T, m *chatModel, st store.TaskStore) store.DailyStore {
+	t.Helper()
+	d, ok := st.(store.DailyStore)
+	if !ok {
+		t.Fatal("sqlite store should implement DailyStore")
+	}
+	m.deps.Dailies = d
+	return d
+}
+
+// A failed generation must never overwrite a daily the user edited by hand: the
+// deterministic fallback cannot reconstruct that text.
+func TestDailyFailureKeepsStoredDraft(t *testing.T) {
+	m, st := newTestModel(t)
+	dailies := dailyStore(t, m, st)
+	ctx := context.Background()
+
+	if err := dailies.SaveDaily(ctx, "2026-07-07", curatedDaily); err != nil {
+		t.Fatal(err)
+	}
+
+	m.Update(dailyMsg{
+		dateKey:  "2026-07-07",
+		fallback: "**Daily:**  2026-07-07 JUL\n\n**Trabajo:**\n  - [FEAT] mechanical fallback",
+		prior:    curatedDaily,
+		err:      errors.New("provider unreachable"),
+	})
+
+	got, err := dailies.GetDaily(ctx, "2026-07-07")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Content != curatedDaily {
+		t.Fatalf("failed generation overwrote the stored daily:\n got: %q\nwant: %q", got.Content, curatedDaily)
+	}
+	if m.dailyDraft != curatedDaily {
+		t.Fatalf("in-memory draft replaced: %q", m.dailyDraft)
+	}
+	if !hasRole(m.entries, "err") {
+		t.Fatalf("the failure should be reported; entries=%+v", m.entries)
+	}
+}
+
+// An empty model response with no error is still a failure — it must warn
+// instead of silently replacing the draft.
+func TestDailyEmptyResponseWarnsAndKeepsDraft(t *testing.T) {
+	m, st := newTestModel(t)
+	dailies := dailyStore(t, m, st)
+	ctx := context.Background()
+
+	if err := dailies.SaveDaily(ctx, "2026-07-07", curatedDaily); err != nil {
+		t.Fatal(err)
+	}
+
+	m.Update(dailyMsg{
+		dateKey:  "2026-07-07",
+		text:     "   ",
+		fallback: "**Daily:**  2026-07-07 JUL\n\n**Trabajo:**\n  - [FEAT] mechanical fallback",
+		prior:    curatedDaily,
+	})
+
+	got, err := dailies.GetDaily(ctx, "2026-07-07")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Content != curatedDaily {
+		t.Fatalf("empty response overwrote the stored daily: %q", got.Content)
+	}
+	if !hasRole(m.entries, "err") {
+		t.Fatalf("an empty response must not fail silently; entries=%+v", m.entries)
+	}
+}
+
+// With nothing stored there is nothing to lose, so the fallback is the useful
+// outcome and should be persisted.
+func TestDailyFailureWithoutPriorUsesFallback(t *testing.T) {
+	m, st := newTestModel(t)
+	dailies := dailyStore(t, m, st)
+
+	const fallback = "**Daily:**  2026-07-08 JUL\n\n**Trabajo:**\n  - [FEAT] #1 algo"
+	m.Update(dailyMsg{dateKey: "2026-07-08", fallback: fallback, err: errors.New("boom")})
+
+	got, err := dailies.GetDaily(context.Background(), "2026-07-08")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Content != fallback {
+		t.Fatalf("fallback should be stored when there is no prior draft: %q", got.Content)
 	}
 }
 
