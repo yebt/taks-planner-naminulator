@@ -256,3 +256,50 @@ func TestClearResetsConversation(t *testing.T) {
 		}
 	}
 }
+
+// A credential typed into /key must not be echoed on screen nor left in the
+// recallable input history — the config TUI masks secrets, and the chat command
+// must not be the hole in that.
+func TestKeyCommandDoesNotLeakTheSecret(t *testing.T) {
+	m, _ := newTestModel(t)
+	const secret = "sk-live-do-not-show-me"
+
+	m.ta.SetValue("/key kimi " + secret)
+	m.submit()
+
+	for _, e := range m.entries {
+		if strings.Contains(e.text, secret) {
+			t.Fatalf("secret echoed on screen in a %q entry: %q", e.role, e.text)
+		}
+	}
+	for _, h := range m.history {
+		if strings.Contains(h, secret) {
+			t.Fatalf("secret kept in the input history: %q", h)
+		}
+	}
+
+	// The masked echo should still show what was run.
+	if !hasRoleContaining(m.entries, "cmd", "/key kimi") {
+		t.Fatalf("the command should still be echoed, masked; entries=%+v", m.entries)
+	}
+
+	// And the key must actually have been saved — masking must not break the job.
+	reloaded, err := config.Load(m.deps.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Providers["kimi"].APIKey != secret {
+		t.Fatalf("key not saved: %q", reloaded.Providers["kimi"].APIKey)
+	}
+}
+
+// A bare /key or /key <provider> has nothing sensitive yet, so it stays in the
+// history like any other command.
+func TestPartialKeyCommandStillRecallable(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.ta.SetValue("/key")
+	m.submit()
+	if len(m.history) == 0 || m.history[len(m.history)-1] != "/key" {
+		t.Fatalf("a bare /key should stay recallable, history=%v", m.history)
+	}
+}

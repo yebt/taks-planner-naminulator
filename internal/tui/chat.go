@@ -19,7 +19,10 @@ func (m *chatModel) submit() (tea.Model, tea.Cmd) {
 	if val == "" {
 		return m, nil
 	}
-	m.pushHistory(val)
+	// A credential must not stay one ↑ away for the rest of the session.
+	if !carriesSecret(val) {
+		m.pushHistory(val)
+	}
 	m.ta.Reset()
 	m.suggestions = nil
 	m.selected = 0

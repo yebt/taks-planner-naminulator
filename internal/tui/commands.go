@@ -50,8 +50,30 @@ var needsArg = map[string]bool{
 	"/project": true, "/person": true,
 }
 
+// secretCommands carry a credential in their arguments, so the line must not be
+// echoed verbatim or kept in the recallable input history. The config TUI
+// already masks these; this is the same protection for the chat command.
+var secretCommands = map[string]bool{"/key": true}
+
+// carriesSecret reports whether a command line has a credential typed into it.
+// A bare "/key" or "/key <provider>" has nothing sensitive yet.
+func carriesSecret(val string) bool {
+	fields := strings.Fields(val)
+	return len(fields) > 2 && secretCommands[fields[0]]
+}
+
+// redactCommand returns the form safe to show on screen: the command and its
+// non-secret arguments, with the credential replaced.
+func redactCommand(val string) string {
+	if !carriesSecret(val) {
+		return val
+	}
+	fields := strings.Fields(val)
+	return strings.Join(fields[:2], " ") + " ••••••"
+}
+
 func (m *chatModel) runCommand(val string) tea.Cmd {
-	m.add("cmd", val)
+	m.add("cmd", redactCommand(val))
 	fields := strings.Fields(val)
 	ctx := context.Background()
 
