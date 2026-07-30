@@ -311,6 +311,110 @@ func TestDailyTools(t *testing.T) {
 	}
 }
 
+// newDailyReg builds a registry with activity, dailies and a configured
+// Telegram sender, so the day-scoped tools are all reachable.
+func newDailyReg(t *testing.T) (*Registry, *fakeTelegram) {
+	t.Helper()
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	r := New(st)
+	r.SetActivity(st)
+	r.SetDailies(st)
+	tg := &fakeTelegram{configured: true}
+	r.SetTelegram(tg)
+	return r, tg
+}
+
+// dayToolNames are the tools that accept optional arguments; a truncated or
+// otherwise malformed payload must never be silently defaulted away.
+var dayToolNames = []string{"send_daily", "get_daily", "list_day_tasks", "list_tasks"}
+
+func TestDispatchRejectsMalformedArgs(t *testing.T) {
+	ctx := context.Background()
+	r, tg := newDailyReg(t)
+	// a daily exists for today, so only the bad JSON can stop send_daily
+	if _, err := r.Dispatch(ctx, "save_daily", `{"content":"Daily de hoy"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range dayToolNames {
+		if _, err := r.Dispatch(ctx, name, "{not json"); err == nil {
+			t.Fatalf("%s: malformed arguments should error", name)
+		}
+	}
+	if tg.sent != "" {
+		t.Fatalf("malformed send_daily must not deliver anything, got %q", tg.sent)
+	}
+}
+
+func TestDispatchAcceptsEmptyArgs(t *testing.T) {
+	ctx := context.Background()
+	r, _ := newDailyReg(t)
+	if _, err := r.Dispatch(ctx, "save_daily", `{"content":"Daily de hoy"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range []string{"", "{}"} {
+		for _, name := range dayToolNames {
+			if _, err := r.Dispatch(ctx, name, args); err != nil {
+				t.Fatalf("%s with args %q should still work: %v", name, args, err)
+			}
+		}
+	}
+}
+
+func TestDayFromKeepsLocalDayWindow(t *testing.T) {
+	today, err := dayFrom("hoy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if today.Location() != time.Local {
+		t.Fatalf("hoy resolved outside the local zone: %s", today.Location())
+	}
+	// the store slices its window with day.Location(), so an explicit date must
+	// land in the same zone as "hoy" or the two cover different hours
+	explicit, err := dayFrom(today.Format("2006-01-02"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicit.Location() != time.Local {
+		t.Fatalf("explicit date resolved outside the local zone: %s", explicit.Location())
+	}
+	ty, tm, td := today.Date()
+	ey, em, ed := explicit.Date()
+	if ty != ey || tm != em || td != ed {
+		t.Fatalf("hoy and its explicit date disagree: %s vs %s", today, explicit)
+	}
+	start := time.Date(ty, tm, td, 0, 0, 0, 0, today.Location())
+	if got := time.Date(ey, em, ed, 0, 0, 0, 0, explicit.Location()); !got.Equal(start) {
+		t.Fatalf("day windows differ: %s vs %s", start, got)
+	}
+}
+
+func TestDayFromRejectsInvalidDate(t *testing.T) {
+	for _, in := range []string{"2026-13-45", "mañana-quizá", "32/01/2026"} {
+		if _, err := dayFrom(in); err == nil {
+			t.Fatalf("dayFrom(%q) should reject an invalid date", in)
+		}
+	}
+	// an absent date is the intentional "today" default, not an error
+	if _, err := dayFrom(""); err != nil {
+		t.Fatalf("empty date should default to today: %v", err)
+	}
+
+	ctx := context.Background()
+	r, _ := newDailyReg(t)
+	if _, err := r.Dispatch(ctx, "get_daily", `{"date":"2026-13-45"}`); err == nil {
+		t.Fatal("get_daily should reject an invalid date instead of reading today")
+	}
+	if _, err := r.Dispatch(ctx, "list_day_tasks", `{"day":"mañana-quizá"}`); err == nil {
+		t.Fatal("list_day_tasks should reject an invalid day instead of listing today")
+	}
+}
+
 func TestCreateInvalidType(t *testing.T) {
 	r := newReg(t)
 	if _, err := r.Dispatch(context.Background(), "create_task", `{"type":"nope","title":"x"}`); err == nil {

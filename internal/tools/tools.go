@@ -277,28 +277,39 @@ func (r *Registry) Dispatch(ctx context.Context, name, args string) (string, err
 	}
 }
 
-// dayFrom resolves today/yesterday (es/en) or an explicit YYYY-MM-DD.
-func dayFrom(s string) time.Time {
-	switch strings.ToLower(strings.TrimSpace(s)) {
+// dayFrom resolves today/yesterday (es/en) or an explicit YYYY-MM-DD. An empty
+// argument means today (the no-arg default); anything else that doesn't parse is
+// an error so the agent loop sees it instead of silently getting today.
+// Explicit dates are parsed in the local zone: the store derives its day window
+// from day.Location(), so a UTC date and a local time.Now() would otherwise
+// cover different hours for the same calendar day.
+func dayFrom(s string) (time.Time, error) {
+	tok := strings.TrimSpace(s)
+	switch strings.ToLower(tok) {
 	case "", "today", "hoy":
-		return time.Now()
+		return time.Now(), nil
 	case "yesterday", "ayer":
-		return time.Now().AddDate(0, 0, -1)
+		return time.Now().AddDate(0, 0, -1), nil
 	}
-	if t, err := time.Parse("2006-01-02", strings.TrimSpace(s)); err == nil {
-		return t
+	t, err := time.ParseInLocation("2006-01-02", tok, time.Local)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("date must be today | yesterday | YYYY-MM-DD, got %q", s)
 	}
-	return time.Now()
+	return t, nil
 }
 
 func (r *Registry) listDayTasks(ctx context.Context, args string) (string, error) {
 	var in struct {
 		Day string `json:"day"`
 	}
-	_ = json.Unmarshal([]byte(orEmptyObj(args)), &in)
-	day := dayFrom(in.Day)
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("list_day_tasks: bad args: %w", err)
+	}
+	day, err := dayFrom(in.Day)
+	if err != nil {
+		return "", fmt.Errorf("list_day_tasks: %w", err)
+	}
 	var tasks []domain.Task
-	var err error
 	if r.activity != nil {
 		tasks, err = r.activity.TasksWithActivityOn(ctx, day)
 	} else {
@@ -322,7 +333,11 @@ func (r *Registry) saveDaily(ctx context.Context, args string) (string, error) {
 	if strings.TrimSpace(in.Content) == "" {
 		return "", fmt.Errorf("save_daily: content is required")
 	}
-	key := dayFrom(in.Date).Format("2006-01-02")
+	day, err := dayFrom(in.Date)
+	if err != nil {
+		return "", fmt.Errorf("save_daily: %w", err)
+	}
+	key := day.Format("2006-01-02")
 	if err := r.dailies.SaveDaily(ctx, key, in.Content); err != nil {
 		return "", err
 	}
@@ -331,8 +346,14 @@ func (r *Registry) saveDaily(ctx context.Context, args string) (string, error) {
 
 func (r *Registry) getDaily(ctx context.Context, args string) (string, error) {
 	var in struct{ Date string }
-	_ = json.Unmarshal([]byte(orEmptyObj(args)), &in)
-	key := dayFrom(in.Date).Format("2006-01-02")
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("get_daily: bad args: %w", err)
+	}
+	day, err := dayFrom(in.Date)
+	if err != nil {
+		return "", fmt.Errorf("get_daily: %w", err)
+	}
+	key := day.Format("2006-01-02")
 	d, err := r.dailies.GetDaily(ctx, key)
 	if err != nil {
 		return "", err
@@ -345,8 +366,14 @@ func (r *Registry) sendDaily(ctx context.Context, args string) (string, error) {
 		return "", fmt.Errorf("send_daily: Telegram not configured")
 	}
 	var in struct{ Date string }
-	_ = json.Unmarshal([]byte(orEmptyObj(args)), &in)
-	key := dayFrom(in.Date).Format("2006-01-02")
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("send_daily: bad args: %w", err)
+	}
+	day, err := dayFrom(in.Date)
+	if err != nil {
+		return "", fmt.Errorf("send_daily: %w", err)
+	}
+	key := day.Format("2006-01-02")
 	d, err := r.dailies.GetDaily(ctx, key)
 	if err != nil {
 		return "", fmt.Errorf("send_daily: no daily for %s", key)
@@ -519,7 +546,9 @@ func (r *Registry) listTasks(ctx context.Context, args string) (string, error) {
 	var in struct {
 		Status string `json:"status"`
 	}
-	_ = json.Unmarshal([]byte(orEmptyObj(args)), &in)
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("list_tasks: bad args: %w", err)
+	}
 	tasks, err := r.store.List(ctx, store.Filter{Status: domain.Status(in.Status)})
 	if err != nil {
 		return "", err
