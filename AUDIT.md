@@ -4,12 +4,16 @@
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 34 / 42 closed. Every CRITICAL, every HIGH and every MEDIUM is
-done**, along with the two findings raised during remediation and most of the
+**Progress: 34 / 42 closed. Every CRITICAL and every HIGH is done**, along with
+14 of the 15 MEDIUMs, both findings raised during remediation, and most of the
 LOW list.
 
-The remaining 8 are LOW items that were **deliberately declined**, each with a
-reason — see [Declined](#declined). They are not backlog; they are decisions.
+Genuinely open: **[M6](#m6)** — `Dispatch` is exported with no nil-dependency
+guards. Latent rather than live (nothing reaches those paths today), which is
+why it slipped to the end.
+
+The other 7 are LOW items **deliberately declined**, each with a reason — see
+[Declined](#declined). They are not backlog; they are decisions.
 [C1](#c1) ✅ [C2](#c2) ✅ [C3](#c3) ✅ · [H1](#h1) ✅ [H2](#h2) ✅ [H3](#h3) ✅
 [H4](#h4) ✅ [H5](#h5) ✅ [H6](#h6) ✅ [H7](#h7) ✅ · [M1](#m1) ✅ [M5](#m5) ✅
 [M14](#m14) ✅ · [N1](#n1) ✅
@@ -1322,5 +1326,8 @@ Recorded so future audits don't re-litigate these:
    [L5](#low), [L7](#low), [L8](#low), [L14](#low). The rest are
    [declined](#declined) with reasons.
 
-**The audit is closed.** Everything that could cost a user data, a credential, a
-delivery or a working UI has been fixed, tested, and verified failing-first.
+12. **← NEXT:** [M6](#m6), the one MEDIUM left — nil guards on the exported
+   `Dispatch`. Latent today, since every path is wired at startup.
+
+Everything that could cost a user data, a credential, a delivery or a working UI
+has been fixed, tested, and verified failing-first.
