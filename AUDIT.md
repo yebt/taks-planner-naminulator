@@ -4,15 +4,14 @@
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 19 / 42 closed — every CRITICAL, every HIGH, plus CI, the `tui.go`
-split and the SQLite/Plane robustness pair.**
+**Progress: 21 / 42 closed — every CRITICAL, every HIGH, and every structural
+MEDIUM.** What is left is small: behaviour polish and cleanup.
 [C1](#c1) ✅ [C2](#c2) ✅ [C3](#c3) ✅ · [H1](#h1) ✅ [H2](#h2) ✅ [H3](#h3) ✅
 [H4](#h4) ✅ [H5](#h5) ✅ [H6](#h6) ✅ [H7](#h7) ✅ · [M1](#m1) ✅ [M5](#m5) ✅
 [M14](#m14) ✅ · [N1](#n1) ✅
 
-What remains is MEDIUM and below: [M12](#m12) table-driven tools, [M11](#m11)
-shared adapter factory, [M9](#m9), [M10](#m10), [M15](#m15), [N2](#n2), and the
-[L1–L14](#low) cleanup.
+Still open: [M4](#m4) (now a one-liner, see [M12](#m12)), [M2](#m2), [M9](#m9),
+[M10](#m10), [M15](#m15), [N2](#n2), and the [L1, L3–L14](#low) cleanup.
 
 Suite green after every fix, `vet` and `gofmt` clean. **Every closed item ships
 with a test that was verified to fail against the old code** — reverted in place
@@ -82,8 +81,8 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | [M8](#m8) | ✅ | MEDIUM | `Syncer.Push` can create duplicate Plane issues |
 | [M9](#m9) | ⬜ | MEDIUM | `PullStates` aborts the batch and hides which task failed |
 | [M10](#m10) | ⬜ | MEDIUM | Agent max-steps exhaustion leaves dangling history |
-| [M11](#m11) | ⬜ | MEDIUM | `internal/tui` imports concrete adapters, duplicating wiring |
-| [M12](#m12) | ⬜ | MEDIUM | `Definitions()` / `Dispatch()` are two hand-synced registries |
+| [M11](#m11) | ✅ | MEDIUM | `internal/tui` imports concrete adapters, duplicating wiring |
+| [M12](#m12) | ✅ | MEDIUM | `Definitions()` / `Dispatch()` are two hand-synced registries |
 | [M13](#m13) | ✅ | MEDIUM | No CI |
 | [M14](#m14) | ✅ | MEDIUM | `buildDaily` hardcodes "hoy" for every date |
 | [M15](#m15) | ⬜ | MEDIUM | No `list_dailies` tool — README oversells conversational parity |
@@ -952,7 +951,7 @@ A subsequent `Send` starts from a dangling tool-call turn.
 always returns `ToolCalls`, assert the max-steps error **and** the resulting
 `History()` state.
 
-### M11 — `internal/tui` imports concrete adapters {#m11}
+### M11 — `internal/tui` imports concrete adapters {#m11} ✅ DONE
 
 **Where:** `internal/tui/config.go:12-14, 217, 231-233` vs `internal/tui/tui.go:34-39`
 
@@ -961,10 +960,29 @@ imports `internal/plane` and `internal/telegram` directly and constructs clients
 ad hoc — duplicating the wiring already in `cmd/planner/main.go:163-177`. A
 same-package violation of interfaces declared 200 lines away.
 
-**Fix:** move client construction into a shared factory both `main.go` and the
-config TUI call.
+**Fix applied:** a new `internal/wiring` package owns adapter construction —
+`PlaneClient(cfg)`, `PlaneSyncer(cfg, st)`, `TelegramClient(cfg)`. Both
+`cmd/planner/main.go` and `internal/tui/config.go` call it; neither imports
+`internal/plane` or `internal/telegram` any more. Verified: exactly one
+non-adapter file in the repo imports those packages, and it is `wiring.go`.
 
-### M12 — Two hand-synced tool registries {#m12}
+All three take the whole `config.Config` rather than sub-sections, because the
+knowledge being centralised is precisely *which config section feeds which
+adapter*. `RunConfig` and `RunChat` signatures are unchanged.
+
+**What this does NOT fix, stated in the package doc comment so the next reader
+cannot mistake it:** `internal/tui` is not port-pure. The config TUI needs
+`ListStates`, whose result type is `plane.State`, so `internal/tui` still
+depends on `internal/plane` transitively through `wiring`. Defining local mirror
+types to hide that would buy an import-graph cosmetic at the price of a
+translation layer and a second type to keep in sync — a worse trade. The
+duplication was the real defect; the coupling is left visible.
+
+**Tests added** (`internal/wiring/wiring_test.go`): each constructor yields an
+unconfigured client from a zero config and a configured one from a populated
+config. No network.
+
+### M12 — Two hand-synced tool registries {#m12} ✅ DONE
 
 **Where:** `internal/tools/tools.go:86-238` (`Definitions`) and `241-278` (`Dispatch`)
 
@@ -973,7 +991,46 @@ unenforced. Adding a tool means editing both plus the handler. Every handler als
 repeats the same unmarshal boilerplate (12+ times) and the mutators repeat
 `pushSync` → `logActivity` → `marshal(view(t))` (4 times).
 
-**Fix:** one table `[]struct{Name; Schema; Handler}` generating both.
+**Fix applied:** a single `toolTable []toolDef` with `Def llm.Tool`,
+`Enabled func(*Registry) bool` and `Handler func(*Registry, context.Context,
+string) (string, error)`. `Definitions()` is a filter over it; `Dispatch()` is a
+map lookup built from the same table. A tool can no longer be advertised without
+a handler, or carry a handler nobody advertises.
+
+Two decisions from the implementer worth recording:
+
+- **No separate `Name` field**, contrary to my initial sketch. `Name` alongside
+  `Def.Name` would be a second pair of values to hand-synchronise — the exact
+  bug class this finding is about. Identity lives in `Def.Name` only. Good push
+  back.
+- **Handlers are method expressions** (`Handler: (*Registry).createTask`), whose
+  type is already the required signature. No closures, no wrappers, and not one
+  handler body was touched.
+
+**Gating is preserved precisely, including an asymmetry worth knowing about:**
+`Enabled` gates `Definitions` only. Today's `Dispatch` has no gating at all —
+`recall_memory` dispatches even with no memory backend and the handler returns
+"memory backend not available". Adding an `Enabled` check to `Dispatch` would
+have been a silent behaviour change, so it was not done. Documented on the field.
+
+**Proof the schemas are unchanged:** rather than diffing names, the implementer
+extracted a pristine `git archive HEAD` tree, ran the same dump in both, and
+diffed `json.MarshalIndent(Definitions())` for a fully wired registry —
+**byte-identical**, including descriptions, JSON-schema parameters, required
+arrays and order.
+
+**Tests added:** `TestToolTableIsWellFormed`, `TestFullRegistryAdvertisesExactly`
+(pins all 16 names explicitly, order included), `TestGatingHidesUnwiredTools`
+(5 subtests), `TestEveryAdvertisedToolDispatches`. The `memory present but
+unavailable` subtest exists because `memEnabled()` is `r.mem != nil &&
+r.mem.Available()` — a `Noop` backend must not advertise the memory tools.
+
+Guards were mutation-tested, not merely observed green: renaming a tool,
+removing a gate, and nilling a handler each fail a specific test.
+
+**[M4](#m4) is now a one-line change** on the `send_daily` entry, and it will
+break the `dailies only` subtest — which is the point: the behaviour change has
+to be acknowledged rather than slip through.
 
 ### M13 — No CI {#m13} ✅ DONE
 
@@ -1193,11 +1250,12 @@ Recorded so future audits don't re-litigate these:
 7. ✅ **[M13](#m13) CI** — moved ahead of the structural work on purpose: [M3](#m3)
    is a ~2400-line mechanical refactor, and it should land against an automated
    gate rather than someone remembering to run the suite.
-8. 🔧 **Structural:** ~~[M3](#m3) file split~~ done. **← NEXT:** [M12](#m12)
-   table-driven tools, [M11](#m11) shared adapter factory. Pure refactors — land
-   them behind the tests added in steps 1–6 and the CI gate from step 7.
+8. ✅ **Structural:** ~~[M3](#m3)~~ file split, ~~[M12](#m12)~~ table-driven
+   tools, ~~[M11](#m11)~~ shared adapter factory — all done behind the tests from
+   steps 1–6 and the CI gate from step 7.
 9. ✅ **Robustness pair:** ~~[M7](#m7)~~ SQLite pragmas and ~~[M8](#m8)~~
    duplicate Plane issues — done together, since M7's missing busy timeout was
    what made M8's window likely in the first place.
-10. **Leftovers:** [M9](#m9), [M10](#m10), [M15](#m15), [N2](#n2), and the
-   [L1–L14](#low) cleanup.
+10. **← NEXT · Leftovers:** [M4](#m4) first (one line, and [M12](#m12) left the
+   test that forces it to be acknowledged), then [M2](#m2), [M9](#m9),
+   [M10](#m10), [M15](#m15), [N2](#n2), and the [L1, L3–L14](#low) cleanup.
