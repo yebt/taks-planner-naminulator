@@ -898,3 +898,40 @@ func TestEveryAdvertisedToolDispatches(t *testing.T) {
 		}
 	}
 }
+
+// Dispatch is exported, and until now the registration gate was the ONLY thing
+// standing between a nil interface and a panic inside it. Registration gates
+// what the model is *told* exists; it does not gate what can be called. Every
+// handler that needs a backend must say so itself.
+//
+// Note the failure mode this guards: without the checks these calls do not fail,
+// they panic on a nil dereference and take the whole test binary with them.
+func TestDispatchGuardsMissingBackends(t *testing.T) {
+	r := newReg(t) // task store only: no dailies, no context store, no memory
+
+	tests := []struct {
+		tool string
+		args string
+	}{
+		{"save_daily", `{"date":"2026-07-30","content":"x"}`},
+		{"get_daily", `{"date":"2026-07-30"}`},
+		{"list_dailies", `{}`},
+		{"send_daily", `{"date":"2026-07-30"}`},
+		{"upsert_project", `{"slug":"liquida"}`},
+		{"add_project_note", `{"slug":"liquida","text":"x"}`},
+		{"upsert_person", `{"nick":"kari"}`},
+		{"add_person_note", `{"nick":"kari","text":"x"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.tool, func(t *testing.T) {
+			out, err := r.Dispatch(context.Background(), tt.tool, tt.args)
+			if err == nil {
+				t.Fatalf("%s with no backend should error, got %q", tt.tool, out)
+			}
+			if !strings.Contains(err.Error(), tt.tool) {
+				t.Fatalf("the error should name the tool, got: %v", err)
+			}
+		})
+	}
+}

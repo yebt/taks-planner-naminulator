@@ -400,6 +400,9 @@ func (r *Registry) listDayTasks(ctx context.Context, args string) (string, error
 }
 
 func (r *Registry) saveDaily(ctx context.Context, args string) (string, error) {
+	if !r.dailiesEnabled() {
+		return "", fmt.Errorf("save_daily: no daily store configured")
+	}
 	var in struct{ Date, Content string }
 	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
 		return "", fmt.Errorf("save_daily: bad args: %w", err)
@@ -419,6 +422,9 @@ func (r *Registry) saveDaily(ctx context.Context, args string) (string, error) {
 }
 
 func (r *Registry) getDaily(ctx context.Context, args string) (string, error) {
+	if !r.dailiesEnabled() {
+		return "", fmt.Errorf("get_daily: no daily store configured")
+	}
 	var in struct{ Date string }
 	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
 		return "", fmt.Errorf("get_daily: bad args: %w", err)
@@ -445,6 +451,9 @@ const defaultDailyListLimit = 30
 const dailyPreviewChars = 120
 
 func (r *Registry) listDailies(ctx context.Context, args string) (string, error) {
+	if !r.dailiesEnabled() {
+		return "", fmt.Errorf("list_dailies: no daily store configured")
+	}
 	var in struct {
 		Limit int `json:"limit"`
 	}
@@ -478,6 +487,9 @@ func (r *Registry) listDailies(ctx context.Context, args string) (string, error)
 }
 
 func (r *Registry) sendDaily(ctx context.Context, args string) (string, error) {
+	if !r.dailiesEnabled() {
+		return "", fmt.Errorf("send_daily: no daily store configured")
+	}
 	if r.tg == nil || !r.tg.Configured() {
 		return "", fmt.Errorf("send_daily: Telegram not configured")
 	}
@@ -501,6 +513,9 @@ func (r *Registry) sendDaily(ctx context.Context, args string) (string, error) {
 }
 
 func (r *Registry) upsertProject(ctx context.Context, args string) (string, error) {
+	if !r.ctxEnabled() {
+		return "", fmt.Errorf("upsert_project: no context store configured")
+	}
 	var in struct{ Slug, Name, Description string }
 	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
 		return "", fmt.Errorf("upsert_project: bad args: %w", err)
@@ -516,6 +531,9 @@ func (r *Registry) upsertProject(ctx context.Context, args string) (string, erro
 }
 
 func (r *Registry) addProjectNote(ctx context.Context, args string) (string, error) {
+	if !r.ctxEnabled() {
+		return "", fmt.Errorf("add_project_note: no context store configured")
+	}
 	var in struct{ Slug, Kind, Text string }
 	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
 		return "", fmt.Errorf("add_project_note: bad args: %w", err)
@@ -530,6 +548,9 @@ func (r *Registry) addProjectNote(ctx context.Context, args string) (string, err
 }
 
 func (r *Registry) upsertPerson(ctx context.Context, args string) (string, error) {
+	if !r.ctxEnabled() {
+		return "", fmt.Errorf("upsert_person: no context store configured")
+	}
 	var in struct{ Nick, Name, Role string }
 	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
 		return "", fmt.Errorf("upsert_person: bad args: %w", err)
@@ -545,6 +566,9 @@ func (r *Registry) upsertPerson(ctx context.Context, args string) (string, error
 }
 
 func (r *Registry) addPersonNote(ctx context.Context, args string) (string, error) {
+	if !r.ctxEnabled() {
+		return "", fmt.Errorf("add_person_note: no context store configured")
+	}
 	var in struct{ Nick, Kind, Text string }
 	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
 		return "", fmt.Errorf("add_person_note: bad args: %w", err)
