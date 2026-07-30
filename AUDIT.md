@@ -4,10 +4,9 @@
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 8 / 41 closed, 1 partial** — [C2](#c2) ✅ · [C3](#c3) ✅ ·
-[H1](#h1) ✅ · [H2](#h2) ✅ · [H6](#h6) ✅ · [M1](#m1) ✅ · [M5](#m5) ✅ ·
-[M14](#m14) ✅ · [C1a](#c1) ✅ (engram timeout) · [C1b](#c1) ⬜ deferred
-(the `runCommand` refactor) · 1 new finding filed ([N1](#n1)).
+**Progress: 10 / 41 closed — all three CRITICALs are done.**
+[C1](#c1) ✅ · [C2](#c2) ✅ · [C3](#c3) ✅ · [H1](#h1) ✅ · [H2](#h2) ✅ ·
+[H6](#h6) ✅ · [M1](#m1) ✅ · [M5](#m5) ✅ · [M14](#m14) ✅ · [N1](#n1) ✅
 
 Suite green after every fix, `vet` and `gofmt` clean. **Every closed item ships
 with a test that was verified to fail against the old code** — reverted in place
@@ -55,9 +54,9 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 
 | ID | St | Severity | Title |
 | -- | -- | -------- | ----- |
-| [C1](#c1) | 🔧 | CRITICAL | Slash commands block the Bubbletea event loop — unrecoverable freeze |
+| [C1](#c1) | ✅ | CRITICAL | Slash commands block the Bubbletea event loop — unrecoverable freeze |
 | [C1a](#c1) | ✅ | — | ↳ engram shell-out had no deadline at all (worst case: no escape) |
-| [C1b](#c1) | ⬜ | — | ↳ move blocking branches of `runCommand` out of `Update()` — **deferred** |
+| [C1b](#c1) | ✅ | — | ↳ blocking branches of `runCommand` moved out of `Update()` |
 | [C2](#c2) | ✅ | CRITICAL | `contextmgr.Fit` can return only the system message |
 | [C3](#c3) | ✅ | CRITICAL | Daily fallback silently overwrites a hand-edited draft |
 | [H1](#h1) | ✅ | HIGH | Telegram bot token leaks on screen through `*url.Error` |
@@ -82,7 +81,7 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | [M13](#m13) | ⬜ | MEDIUM | No CI |
 | [M14](#m14) | ✅ | MEDIUM | `buildDaily` hardcodes "hoy" for every date |
 | [M15](#m15) | ⬜ | MEDIUM | No `list_dailies` tool — README oversells conversational parity |
-| [N1](#n1) | ⬜ | MEDIUM | `persistDaily` discards the save error — "daily ready" can be a lie |
+| [N1](#n1) | ✅ | MEDIUM | `persistDaily` discards the save error — "daily ready" can be a lie |
 | [L1–L14](#low) | ⬜ | LOW | Cleanup, docs drift, cosmetics |
 
 Findings discovered *during* remediation are filed under [New findings](#new)
@@ -148,21 +147,57 @@ runner kills it (`panic: test timed out after 5s`). The test reproduces the
 reported bug literally. With the fix it passes in 40ms. Existing tests were not
 modified.
 
-#### C1b — blocking branches still run inside `Update()` ⬜ DEFERRED
+#### C1b — blocking branches ran inside `Update()` ✅ DONE
 
-Still open, by explicit decision — it is a refactor, not a patch, and deserves a
-dedicated session.
+**Fix applied:** a single `(*chatModel).busy(label, timeout, fn)` helper. It sets
+the spinner, then returns `tea.Batch(run, spinnerTick())` where `run` executes
+`fn` on its own goroutine under `context.WithTimeout` and hands the result back
+as an `asyncMsg` carrying the entries to append.
 
-`submit` still calls `m.runCommand(val)` inline inside `Update()` with
-`context.Background()`. `/sync`, `/pull`, `/daily send` and the other blocking
-branches still freeze the UI for the duration of their HTTP timeouts, with no
-spinner and no way to cancel.
+Two properties, both deliberate:
 
-**Remaining work:** move each blocking branch into a `tea.Cmd` (the non-slash
-chat path at `tui.go:725-730` is the model to copy), give each a
-`context.WithTimeout`, and set `m.thinking` so the user sees a spinner. Fold
-[N1](#n1) into the same pass — `persistDaily` sits on the same
-`context.Background()` surface.
+- **Off the loop** — `Update()` is the only thing draining the Bubbletea event
+  queue, so blocking work there freezes everything, ctrl+c included.
+- **Bounded anyway** — an unbounded call on a background goroutine leaks instead
+  of freezing. Better, but still wrong. Timeouts: `memoryOpTimeout` 30s,
+  `telegramOpTimeout` 30s, `planeOpTimeout` 5m, `storeOpTimeout` 10s. Generous on
+  purpose: the job is to guarantee an end, not to second-guess a slow network.
+
+**Converted:** `/recall`, `/remember`, `/sync` (`syncAll`), `/pull`,
+`/daily send` (`sendDaily`).
+
+`busy`'s closure must not touch model state — it runs concurrently with
+`Update`. Each call site resolves what it needs first and captures it. `sendDaily`
+is the one that mattered: `draftFor` reads `m.dailyDraft`, so the draft is
+resolved on the event loop and only the network call is handed off.
+
+Unconfigured Plane/Telegram still fail fast: they report and return `nil` without
+starting a command or the spinner.
+
+**Also:** the status bar now shows what is running (`recalling…`, `syncing…`,
+`sending…`) instead of a generic `thinking…`, via a new `busyLabel` field. The
+point of this finding is user feedback, and "frozen" versus "working" is exactly
+what the label communicates.
+
+**Landed in:** `internal/tui/tui.go` — new `busy`/`asyncMsg`/`errEntry`/`sysEntry`
+and the timeout constants; `runCommand`, `syncAll`, `sendDaily`, `handleDaily`,
+`statusBar`, `chatModel`.
+
+**Tests added** (`internal/tui/async_test.go`):
+- `TestBlockingCommandsDoNotBlockUpdate` — table-driven; a memory backend that
+  only returns on cancellation, asserting `submit` returns promptly, hands back a
+  `tea.Cmd`, and turns on a *labelled* spinner.
+- `TestBusyBoundsTheWork` — a `fn` that never returns still lands, as an error.
+- `TestAsyncResultAppendsEntriesAndClearsBusy` — per-item failures and the
+  summary both survive the round trip.
+- `TestUnconfiguredCommandsFailFast` — no command, no spinner.
+- `TestDailySaveFailureIsReported` — [N1](#n1), below.
+
+**Teeth verified:** reverting `/recall` to its inline form makes
+`TestBlockingCommandsDoNotBlockUpdate/recall` fail with exactly the right
+diagnosis — `submit blocked: the command is still running inside Update()`.
+
+Verified under `-race`, since this introduces concurrency.
 
 ---
 
@@ -723,7 +758,7 @@ but not `get_daily`/`list_day_tasks`, which fall through to a generic label.
 Discovered while remediating, not in the original sweep. Filed here to be worked
 afterwards, not folded silently into the fix that surfaced them.
 
-### N1 — `persistDaily` discards the save error {#n1}
+### N1 — `persistDaily` discards the save error {#n1} ✅ DONE
 
 **Where:** `internal/tui/tui.go:1457-1461`
 
@@ -748,8 +783,24 @@ visible after a restart.
 Note the same call uses `context.Background()` — it is also part of [C1](#c1)'s
 missing-timeout surface.
 
-**Fix:** return the error and let the caller report it; only claim "ready" once
-the write succeeded.
+**Fix applied:** `persistDaily` now returns its error (bounded by
+`storeOpTimeout`), and both callers branch on it. The success line is only
+printed when the write actually succeeded; otherwise the user is told the daily
+exists **in this session only**:
+
+- generation → `daily generated but NOT saved: <err>`
+- inline edit → `edit kept in this session but NOT saved: <err>`
+
+The wording matters: the in-memory `m.dailyDraft` really does still hold the
+text, so "failed" alone would be misleading — what was lost is durability, and
+the user needs to know it disappears on restart.
+
+**Landed in:** `internal/tui/tui.go` (`persistDaily`, the `dailyMsg` handler, the
+daily-edit key handler)
+
+**Test added:** `TestDailySaveFailureIsReported` — a `DailyStore` whose
+`SaveDaily` always fails; asserts the error is surfaced **and** that the "ready"
+line is not printed.
 
 ---
 
@@ -786,7 +837,9 @@ the write succeeded.
 | 6 | ⬜ | A >4096-char daily is chunked or truncated, not dropped ([H3](#h3)) |
 | 7 | ⬜ | Agent max-steps exhaustion: error returned, and `History()` left in a defined state ([M10](#m10)) |
 | 8 | ⬜ | `PullStates` behavior when task A fails and task B follows ([M9](#m9)) |
-| 9 | ⬜ | `persistDaily` failure is reported instead of announcing "ready" ([N1](#n1)) |
+| 9 | ✅ | `persistDaily` failure is reported instead of announcing "ready" ([N1](#n1)) |
+| 11 | ✅ | Blocking commands return a `tea.Cmd` and never run inside `Update()` ([C1b](#c1)) — 5 tests |
+| 12 | ✅ | A hung engram times out instead of blocking forever ([C1a](#c1)) — 3 tests |
 | 10 | ✅ | `config.json` keeps `0600` across rewrites, dir is `0700`, no temp files left ([M1](#m1)) — 4 tests |
 
 ---
@@ -832,10 +885,8 @@ Recorded so future audits don't re-litigate these:
    ~~[H1](#h1)~~, ~~[M1](#m1)~~ — all done.
 2. ✅ **Correctness:** ~~[C2](#c2)~~, ~~[H2](#h2)~~, ~~[H6](#h6)~~, ~~[M5](#m5)~~,
    ~~[M14](#m14)~~ — all done.
-3. 🔧 **Unfreeze the UI:** [C1a](#c1) ✅ done — engram, the only unrecoverable
-   case, is now bounded. **[C1b](#c1) deferred** to a dedicated session: moving
-   the blocking branches of `runCommand` into `tea.Cmd` is a refactor, and
-   [N1](#n1) folds into that same pass.
+3. ✅ **Unfreeze the UI:** ~~[C1a](#c1)~~ (engram bounded), ~~[C1b](#c1)~~
+   (blocking branches off the event loop), ~~[N1](#n1)~~ — all done.
 4. **Collapse the daily spec:** [H5](#h5) → one `internal/daily` package. Do this
    *before* [H4](#h4), since the renderer should consume the same constants.
 5. **Then [H4](#h4)** (render + wrap), which also fixes the selection desync.
