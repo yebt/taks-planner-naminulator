@@ -133,8 +133,6 @@ func (m *chatModel) View() string {
 		b.WriteString(m.renderSuggestions())
 		b.WriteString("\n")
 	}
-	// Wrap the input in a full-width background so the panel is uniform.
-	// b.WriteString(lipgloss.NewStyle().Width(m.width).Background(inputBG).Render(m.ta.View()))
 	b.WriteString(lipgloss.NewStyle().Width(m.width).Render(m.ta.View()))
 	b.WriteString("\n")
 	b.WriteString(m.footer())

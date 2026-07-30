@@ -270,7 +270,6 @@ func (m *chatModel) report(prefix, out string, err error) {
 	m.add("sys", prefix+out)
 }
 
-// syncAll pushes every local task to Plane, reporting failures individually.
 // syncAll pushes every local task to Plane off the event loop, reporting
 // per-task failures plus a summary when it lands.
 func (m *chatModel) syncAll() tea.Cmd {

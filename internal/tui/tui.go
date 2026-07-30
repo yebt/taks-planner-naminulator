@@ -63,18 +63,10 @@ func RunChat(deps ChatDeps) error {
 func newChatModel(deps ChatDeps) *chatModel {
 	ta := textarea.New()
 	ta.Placeholder = "tell me what you're working on…  (/ for commands)"
-	// ta.Prompt = "▌ "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	// Enter submits; Alt+Enter inserts a newline (multi-line input).
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "newline"))
-	// fill := lipgloss.NewStyle().Background(inputBG)
-	// ta.FocusedStyle.Base = fill
-	// ta.FocusedStyle.Text = fill
-	// ta.FocusedStyle.CursorLine = fill                                                         // single tone — no diff-looking band
-	// ta.FocusedStyle.EndOfBuffer = lipgloss.NewStyle().Background(inputBG).Foreground(inputBG) // hide the "~"
-	// ta.FocusedStyle.Prompt = lipgloss.NewStyle().Background(inputBG).Foreground(lipgloss.Color("111"))
-	// ta.FocusedStyle.Placeholder = lipgloss.NewStyle().Background(inputBG).Foreground(lipgloss.Color("245"))
 	ta.Focus()
 
 	m := &chatModel{

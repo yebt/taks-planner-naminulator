@@ -190,8 +190,6 @@ func (m *chatModel) editDaily(ctx context.Context, day time.Time) {
 	m.layout()
 }
 
-// sendDaily delivers a date's draft to Telegram, degrading with a clear warning
-// when the integration is not configured.
 // sendDaily delivers a stored digest to Telegram. The draft is resolved here,
 // on the event loop, because it reads model state; only the network call is
 // handed off.
