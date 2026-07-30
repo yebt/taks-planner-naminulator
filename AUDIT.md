@@ -4,14 +4,14 @@
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 21 / 42 closed — every CRITICAL, every HIGH, and every structural
-MEDIUM.** What is left is small: behaviour polish and cleanup.
+**Progress: 23 / 42 closed — every CRITICAL, every HIGH, every structural
+MEDIUM, and both remaining security items.** What is left is polish and cleanup.
 [C1](#c1) ✅ [C2](#c2) ✅ [C3](#c3) ✅ · [H1](#h1) ✅ [H2](#h2) ✅ [H3](#h3) ✅
 [H4](#h4) ✅ [H5](#h5) ✅ [H6](#h6) ✅ [H7](#h7) ✅ · [M1](#m1) ✅ [M5](#m5) ✅
 [M14](#m14) ✅ · [N1](#n1) ✅
 
-Still open: [M4](#m4) (now a one-liner, see [M12](#m12)), [M2](#m2), [M9](#m9),
-[M10](#m10), [M15](#m15), [N2](#n2), and the [L1, L3–L14](#low) cleanup.
+Still open: [M9](#m9), [M10](#m10), [M15](#m15), [N2](#n2), and the
+[L1, L3–L14](#low) cleanup. None of them can bite a user today.
 
 Suite green after every fix, `vet` and `gofmt` clean. **Every closed item ships
 with a test that was verified to fail against the old code** — reverted in place
@@ -72,9 +72,9 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | [H6](#h6) | ✅ | HIGH | Malformed tool-call JSON silently swallowed in 4 handlers |
 | [H7](#h7) | ✅ | HIGH | `pushSync` discards Plane errors with zero signal |
 | [M1](#m1) | ✅ | MEDIUM | `config.json` is world-readable and written non-atomically |
-| [M2](#m2) | ⬜ | MEDIUM | `/key` echoes the secret and keeps it in input history |
+| [M2](#m2) | ✅ | MEDIUM | `/key` echoes the secret and keeps it in input history |
 | [M3](#m3) | ✅ | MEDIUM | `tui.go` is a 2503-line god-object |
-| [M4](#m4) | ⬜ | MEDIUM | `send_daily` advertised to the LLM without Telegram configured |
+| [M4](#m4) | ✅ | MEDIUM | `send_daily` advertised to the LLM without Telegram configured |
 | [M5](#m5) | ✅ | MEDIUM | `dayFrom` swallows bad dates; slash path rejects them |
 | [M6](#m6) | ⬜ | MEDIUM | `Dispatch` is exported with no nil-dependency guards |
 | [M7](#m7) | ✅ | MEDIUM | SQLite opened without `busy_timeout` / WAL / conn limit |
@@ -725,7 +725,7 @@ fix**, verified by trying exactly that. `TestSaveUsesPrivateDirMode` uses a
 nested path on purpose — `t.TempDir()` is already `0700`, so a directory test
 written against it directly would pass vacuously.
 
-### M2 — `/key` echoes the secret and keeps it in input history {#m2}
+### M2 — `/key` echoes the secret and keeps it in input history {#m2} ✅ DONE
 
 **Where:** `internal/tui/tui.go:855-856` (`m.add("cmd", val)`), `621` (`m.pushHistory(val)`)
 
@@ -734,7 +734,24 @@ written against it directly would pass vacuously.
 does this correctly (`config.go:467,485-493`, `maskSecret`) — the protection just
 doesn't extend to the chat command.
 
-**Fix:** mask the echo and skip `pushHistory` for `/key`.
+**Fix applied:** two helpers in `commands.go`. `carriesSecret(val)` reports
+whether a credential has actually been typed — a bare `/key` or `/key <provider>`
+has nothing sensitive yet and stays fully recallable. `redactCommand(val)`
+returns the on-screen form, `/key kimi ••••••`.
+
+`runCommand` echoes the redacted form; `submit` skips `pushHistory` when the
+line carries a secret. The list is a map (`secretCommands`), so a future command
+that takes a credential is one entry away from the same protection.
+
+**Tests added** (`internal/tui/model_test.go`):
+- `TestKeyCommandDoesNotLeakTheSecret` — the secret appears in **no** entry and
+  **no** history slot, the masked echo still shows `/key kimi`, **and the key is
+  actually saved to disk** (masking must not break the job it was doing).
+- `TestPartialKeyCommandStillRecallable` — a bare `/key` is still recallable, so
+  the fix does not over-reach into ordinary usability.
+
+Verified failing-first: with the echo un-redacted the test reports
+`secret echoed on screen in a "cmd" entry`.
 
 ### M3 — `tui.go` is a 2503-line god-object {#m3} ✅ DONE
 
@@ -810,7 +827,7 @@ lines, 211 of which are the single `runCommand` switch.
 | `conversations.go` | 1536-1552, 2045-2129 | save/load/resume/autosave |
 | `render.go` | 117-141, 2336-2399, 2443-2503 | styles, `add`, `setContent`, `footer`, `statusBar` |
 
-### M4 — `send_daily` advertised without Telegram configured {#m4}
+### M4 — `send_daily` advertised without Telegram configured {#m4} ✅ DONE
 
 **Where:** `internal/tools/tools.go:66` (`dailiesEnabled`), `208`, `230-234`
 
@@ -821,7 +838,28 @@ The memory tools do this correctly (`memEnabled()`, `tools.go:75,148`).
 `send_daily`, offers to deliver the daily, calls it, and fails. The user is
 promised a delivery the system knew in advance it could not make.
 
-**Fix:** gate registration on `r.tg != nil && r.tg.Configured()`.
+**Fix applied:** the `send_daily` entry in `toolTable` is now gated on
+`r.dailiesEnabled() && r.tg != nil && r.tg.Configured()` — one line, exactly
+where [M12](#m12) said it would land.
+
+**[M12](#m12)'s guard did its job.** The change immediately broke
+`TestGatingHidesUnwiredTools/dailies_only`, which is the whole point: a
+behaviour change to what the model is offered has to be acknowledged, not slip
+through.
+
+Rather than just relaxing that expectation, the gating table grew from 5 cases
+to 8, covering all four dailies × Telegram combinations:
+
+| Case | `send_daily` advertised |
+| ---- | ----------------------- |
+| dailies only | no |
+| telegram without dailies | no |
+| dailies + unconfigured telegram | no |
+| dailies + configured telegram | **yes** |
+
+That last row is load-bearing. Without it the suite would also pass if
+`send_daily` disappeared from the registry entirely — a test that only asserts
+absence can be satisfied by deletion.
 
 ### M5 — `dayFrom` swallows bad dates {#m5} ✅ DONE
 
@@ -1256,6 +1294,7 @@ Recorded so future audits don't re-litigate these:
 9. ✅ **Robustness pair:** ~~[M7](#m7)~~ SQLite pragmas and ~~[M8](#m8)~~
    duplicate Plane issues — done together, since M7's missing busy timeout was
    what made M8's window likely in the first place.
-10. **← NEXT · Leftovers:** [M4](#m4) first (one line, and [M12](#m12) left the
-   test that forces it to be acknowledged), then [M2](#m2), [M9](#m9),
-   [M10](#m10), [M15](#m15), [N2](#n2), and the [L1, L3–L14](#low) cleanup.
+10. ✅ **Behaviour polish:** ~~[M4](#m4)~~ (one line, caught by [M12](#m12)'s
+   guard exactly as intended) and ~~[M2](#m2)~~ (secret masking).
+11. **← NEXT · Leftovers:** [M9](#m9), [M10](#m10), [M15](#m15), [N2](#n2), and
+   the [L1, L3–L14](#low) cleanup.
