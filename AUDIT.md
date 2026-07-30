@@ -4,16 +4,12 @@
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 34 / 42 closed. Every CRITICAL and every HIGH is done**, along with
-14 of the 15 MEDIUMs, both findings raised during remediation, and most of the
-LOW list.
+**Progress: 35 / 42 closed. Every CRITICAL, every HIGH and every MEDIUM is
+done**, along with both findings raised during remediation and most of the LOW
+list.
 
-Genuinely open: **[M6](#m6)** — `Dispatch` is exported with no nil-dependency
-guards. Latent rather than live (nothing reaches those paths today), which is
-why it slipped to the end.
-
-The other 7 are LOW items **deliberately declined**, each with a reason — see
-[Declined](#declined). They are not backlog; they are decisions.
+The remaining 7 are LOW items **deliberately declined**, each with a reason —
+see [Declined](#declined). They are not backlog; they are decisions.
 [C1](#c1) ✅ [C2](#c2) ✅ [C3](#c3) ✅ · [H1](#h1) ✅ [H2](#h2) ✅ [H3](#h3) ✅
 [H4](#h4) ✅ [H5](#h5) ✅ [H6](#h6) ✅ [H7](#h7) ✅ · [M1](#m1) ✅ [M5](#m5) ✅
 [M14](#m14) ✅ · [N1](#n1) ✅
@@ -84,7 +80,7 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | [M3](#m3) | ✅ | MEDIUM | `tui.go` is a 2503-line god-object |
 | [M4](#m4) | ✅ | MEDIUM | `send_daily` advertised to the LLM without Telegram configured |
 | [M5](#m5) | ✅ | MEDIUM | `dayFrom` swallows bad dates; slash path rejects them |
-| [M6](#m6) | ⬜ | MEDIUM | `Dispatch` is exported with no nil-dependency guards |
+| [M6](#m6) | ✅ | MEDIUM | `Dispatch` is exported with no nil-dependency guards |
 | [M7](#m7) | ✅ | MEDIUM | SQLite opened without `busy_timeout` / WAL / conn limit |
 | [M8](#m8) | ✅ | MEDIUM | `Syncer.Push` can create duplicate Plane issues |
 | [M9](#m9) | ✅ | MEDIUM | `PullStates` aborts the batch and hides which task failed |
@@ -890,7 +886,7 @@ has its own `parseDay`, which already rejected garbage.
 `"mañana-quizá"` and `"32/01/2026"`, confirms `""` still means today, and checks
 the rejection surfaces through `Dispatch` for `get_daily` and `list_day_tasks`.
 
-### M6 — `Dispatch` is exported with no nil-dependency guards {#m6}
+### M6 — `Dispatch` is exported with no nil-dependency guards {#m6} ✅ DONE
 
 **Where:** `internal/tools/tools.go:241`; unguarded derefs at `326, 336, 350, 368, 383, 397, 412`
 
@@ -901,7 +897,25 @@ today because `main.go:158-177` always calls the setters — but registration is
 method. `sendDaily` (`343-353`) happens to check `r.tg` first, which shadows the
 nil-dailies path by luck, not design.
 
-**Fix:** guard each handler the way the memory tools do.
+**Fix applied:** all eight handlers that need a backend now check it first —
+the four daily ones against `dailiesEnabled()`, the four context ones against
+`ctxEnabled()` — exactly as `recallMemory` and `rememberNote` already did.
+
+`sendDaily` no longer depends on its Telegram check happening to shadow the nil
+`dailies` path, which the original audit called out as luck rather than design.
+
+**The distinction that makes this worth fixing at all:** registration gates what
+the model is *told* exists. It does not gate what can be *called*. `Dispatch` is
+an exported method, so any future caller — a test, a CLI path, a second
+front-end — reaches those handlers without passing the gate.
+
+**Test added:** `TestDispatchGuardsMissingBackends`, table-driven over all eight
+tools against a registry wired with a task store only.
+
+**Teeth verified, and the failure mode is worth knowing:** removing one guard
+does not produce a clean failure, it produces
+`panic: runtime error: invalid memory address or nil pointer dereference`
+that takes the whole test binary down. Latent, but not theoretical.
 
 ### M7 — SQLite opened without concurrency pragmas {#m7} ✅ DONE
 
@@ -1326,8 +1340,7 @@ Recorded so future audits don't re-litigate these:
    [L5](#low), [L7](#low), [L8](#low), [L14](#low). The rest are
    [declined](#declined) with reasons.
 
-12. **← NEXT:** [M6](#m6), the one MEDIUM left — nil guards on the exported
-   `Dispatch`. Latent today, since every path is wired at startup.
+12. ✅ ~~[M6](#m6)~~ — nil guards on the exported `Dispatch`.
 
-Everything that could cost a user data, a credential, a delivery or a working UI
+**The audit is closed.** Everything that could cost a user data, a credential, a delivery or a working UI
 has been fixed, tested, and verified failing-first.
