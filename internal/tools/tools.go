@@ -291,14 +291,17 @@ var toolTable = []toolDef{
 		Handler: (*Registry).getDaily,
 	},
 	{
-		// M4: this should also require a configured Telegram sender. Gating it is a
-		// behaviour change and lands on its own; the fix is this Enabled func.
 		Def: llm.Tool{
 			Name:        "send_daily",
 			Description: "Send the stored daily for a date to Telegram. Only when the user asks.",
 			Parameters:  obj(props{"date": strProp("today | yesterday | YYYY-MM-DD")}, "date"),
 		},
-		Enabled: (*Registry).dailiesEnabled,
+		// Requires Telegram too, not just a daily store: advertising a delivery
+		// the system already knows it cannot make leads the model to promise it
+		// and then fail. The memory tools are gated the same way.
+		Enabled: func(r *Registry) bool {
+			return r.dailiesEnabled() && r.tg != nil && r.tg.Configured()
+		},
 		Handler: (*Registry).sendDaily,
 	},
 }

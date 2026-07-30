@@ -614,7 +614,10 @@ var contextToolNames = []string{
 	"upsert_project", "add_project_note", "upsert_person", "add_person_note",
 }
 
-var dailyToolNames = []string{"list_day_tasks", "save_daily", "get_daily", "send_daily"}
+// send_daily is listed apart: it needs a configured Telegram sender on top of a
+// daily store, so the two sets are gated differently.
+var dailyToolNames = []string{"list_day_tasks", "save_daily", "get_daily"}
+var telegramToolNames = []string{"send_daily"}
 
 // allToolNames is the full advertised set of a fully wired registry, written out
 // on purpose: adding or removing a tool has to be acknowledged here.
@@ -734,6 +737,32 @@ func TestGatingHidesUnwiredTools(t *testing.T) {
 			"dailies only",
 			func(r *Registry, st *store.SQLite) { r.SetDailies(st) },
 			append(append([]string{}, baseToolNames...), dailyToolNames...),
+		},
+		{
+			// Telegram configured but no daily store: nothing to send.
+			"telegram without dailies",
+			func(r *Registry, _ *store.SQLite) { r.SetTelegram(&fakeTelegram{configured: true}) },
+			baseToolNames,
+		},
+		{
+			// Wired but unconfigured must behave like absent — otherwise the model
+			// is handed a delivery it will offer and then fail.
+			"dailies with unconfigured telegram",
+			func(r *Registry, st *store.SQLite) {
+				r.SetDailies(st)
+				r.SetTelegram(&fakeTelegram{configured: false})
+			},
+			append(append([]string{}, baseToolNames...), dailyToolNames...),
+		},
+		{
+			// The positive case: only here is send_daily advertised. Without this
+			// the suite would also pass if send_daily disappeared entirely.
+			"dailies with configured telegram",
+			func(r *Registry, st *store.SQLite) {
+				r.SetDailies(st)
+				r.SetTelegram(&fakeTelegram{configured: true})
+			},
+			append(append(append([]string{}, baseToolNames...), dailyToolNames...), telegramToolNames...),
 		},
 	}
 	for _, tc := range tests {
