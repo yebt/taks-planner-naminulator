@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/webcloster-dev/planner/internal/domain"
 	"github.com/webcloster-dev/planner/internal/store"
@@ -176,6 +178,161 @@ func TestSyncerNotConfigured(t *testing.T) {
 	// Push is a no-op when unconfigured (doesn't touch the nil store).
 	if err := sy.Push(context.Background(), &domain.Task{}); err != nil {
 		t.Fatalf("unconfigured push should be a no-op, got %v", err)
+	}
+}
+
+// pullServer answers the two calls a pull makes: the state catalogue, and the
+// per-work-item state lookup. Work item ids listed in failing get a 500, so a
+// single task can be broken while the others stay healthy.
+func pullServer(t *testing.T, failing ...string) *httptest.Server {
+	t.Helper()
+	broken := make(map[string]bool, len(failing))
+	for _, id := range failing {
+		broken[id] = true
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/states/") {
+			w.Write([]byte(`{"results":[{"id":"st-doing","name":"Doing"}]}`))
+			return
+		}
+		for id := range broken {
+			if strings.Contains(r.URL.Path, "/issues/"+id+"/") {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`boom`))
+				return
+			}
+		}
+		w.Write([]byte(`{"state":"st-doing"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// seedSyncedTasks creates synced tasks whose list order is exactly the order of
+// the labels given: List sorts by touched_at DESC, so the first label gets the
+// most recent touch. Tests that care about "the FIRST task fails" depend on it.
+func seedSyncedTasks(t *testing.T, st store.TaskStore, labels ...string) []domain.Task {
+	t.Helper()
+	out := make([]domain.Task, 0, len(labels))
+	base := time.Now().UTC()
+	for i, label := range labels {
+		created, err := st.Create(context.Background(), domain.Task{
+			Label:       label,
+			Type:        domain.TypeFeat,
+			Title:       strings.ToUpper(label),
+			Status:      domain.StatusUnstarted,
+			WorkItemID:  "wi-" + label,
+			WorkItemSeq: i + 1,
+			TouchedAt:   base.Add(-time.Duration(i) * time.Minute),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, created)
+	}
+	return out
+}
+
+// The regression: one task failing must not swallow the rest of the batch. The
+// FIRST task in the list is the broken one, so the old "return on first error"
+// left every other task unrefreshed.
+func TestSyncerPullStatesContinuesAfterTaskFailure(t *testing.T) {
+	srv := pullServer(t, "wi-alpha")
+
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	tasks := seedSyncedTasks(t, st, "alpha", "bravo", "charlie")
+
+	sy := NewSyncer(testClient(srv.URL), st, nil)
+	updated, err := sy.PullStates(context.Background())
+	if err == nil {
+		t.Fatal("the failing task must surface an error")
+	}
+	if updated != 2 {
+		t.Fatalf("the two healthy tasks must still be updated, got %d", updated)
+	}
+	for _, tk := range tasks[1:] {
+		got, gErr := st.Get(context.Background(), tk.ID)
+		if gErr != nil {
+			t.Fatal(gErr)
+		}
+		if got.State != "Doing" {
+			t.Fatalf("task %q was skipped after the earlier failure, state=%q", tk.Label, got.State)
+		}
+	}
+	// The error must point at the task the user has to look at, and only that one.
+	if !strings.Contains(err.Error(), "alpha") {
+		t.Fatalf("error must name the failing task: %v", err)
+	}
+	for _, ok := range []string{"bravo", "charlie"} {
+		if strings.Contains(err.Error(), ok) {
+			t.Fatalf("error must not name the task %q that succeeded: %v", ok, err)
+		}
+	}
+	failed := tasks[0]
+	if got, _ := st.Get(context.Background(), failed.ID); got.State != "" {
+		t.Fatalf("the failing task must stay unrefreshed, got state %q", got.State)
+	}
+}
+
+// A pull where nothing goes wrong must report no error at all: an aggregate
+// error built from an empty failure list would make /pull cry wolf.
+func TestSyncerPullStatesCleanRunReturnsNilError(t *testing.T) {
+	srv := pullServer(t)
+
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	seedSyncedTasks(t, st, "alpha", "bravo", "charlie")
+	// An unsynced task is skipped entirely — it must not count as a failure.
+	if _, err := st.Create(context.Background(), domain.Task{
+		Label: "local-only", Type: domain.TypeFeat, Title: "L", Status: domain.StatusUnstarted,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sy := NewSyncer(testClient(srv.URL), st, nil)
+	updated, err := sy.PullStates(context.Background())
+	if err != nil {
+		t.Fatalf("a clean pull must not report a failure, got %v", err)
+	}
+	if updated != 3 {
+		t.Fatalf("expected 3 tasks updated, got %d", updated)
+	}
+}
+
+// Everything failing is still a full pass over the batch: nothing is updated
+// and every task is named, so the user can see the whole damage at once.
+func TestSyncerPullStatesReportsEveryFailure(t *testing.T) {
+	srv := pullServer(t, "wi-alpha", "wi-bravo", "wi-charlie")
+
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	tasks := seedSyncedTasks(t, st, "alpha", "bravo", "charlie")
+
+	sy := NewSyncer(testClient(srv.URL), st, nil)
+	updated, err := sy.PullStates(context.Background())
+	if err == nil {
+		t.Fatal("expected the failures to surface")
+	}
+	if updated != 0 {
+		t.Fatalf("nothing could be updated, got %d", updated)
+	}
+	for _, tk := range tasks {
+		if !strings.Contains(err.Error(), tk.Label) {
+			t.Fatalf("error must name every failing task, %q missing from: %v", tk.Label, err)
+		}
+		if !strings.Contains(err.Error(), fmt.Sprintf("#%d", tk.ID)) {
+			t.Fatalf("error must carry the task id #%d: %v", tk.ID, err)
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package plane
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -196,6 +197,12 @@ func (s *Syncer) Delete(ctx context.Context, t *domain.Task) error {
 
 // PullStates refreshes local state names from Plane for synced tasks. Returns
 // how many local tasks changed.
+//
+// One bad task must not hide the rest: a per-task failure is collected and the
+// loop moves on, so every task gets its chance to refresh. The returned error
+// (nil when nothing failed) names each task that could not be pulled, the same
+// way a sync does — "#<id> <label>: <cause>" — because a count alone leaves the
+// user with no idea which rows are stale.
 func (s *Syncer) PullStates(ctx context.Context) (int, error) {
 	if !s.Configured() {
 		return 0, fmt.Errorf("plane not configured")
@@ -205,22 +212,47 @@ func (s *Syncer) PullStates(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	updated := 0
+	var failures []error
 	for _, t := range tasks {
 		if t.WorkItemID == "" {
 			continue
 		}
+		// The context being done is fatal for the whole pull, not a per-task
+		// problem: every remaining task would fail the same way.
+		if ctx.Err() != nil {
+			return updated, pullError(updated, append(failures, ctx.Err()))
+		}
 		stateID, err := s.client.IssueStateID(ctx, t.WorkItemID)
 		if err != nil {
-			return updated, err
+			failures = append(failures, taskError(t, err))
+			continue
 		}
 		name := s.stateNameByID(ctx, stateID)
 		if name != "" && name != t.State {
 			t.State = name
 			if err := s.store.Update(ctx, t); err != nil {
-				return updated, err
+				failures = append(failures, taskError(t, err))
+				continue
 			}
 			updated++
 		}
 	}
-	return updated, nil
+	return updated, pullError(updated, failures)
+}
+
+// taskError tags a per-task failure with the identity a user can act on: the
+// local id and label, the same pair the sync report uses.
+func taskError(t domain.Task, err error) error {
+	return fmt.Errorf("#%d %s: %w", t.ID, t.Label, err)
+}
+
+// pullError folds the per-task failures into one error, or nil when there are
+// none — a non-nil error carrying an empty list would make a clean pull look
+// like a failed one.
+func pullError(updated int, failures []error) error {
+	if len(failures) == 0 {
+		return nil
+	}
+	return fmt.Errorf("pulled states: %d task(s) updated, %d failed:\n%w",
+		updated, len(failures), errors.Join(failures...))
 }
