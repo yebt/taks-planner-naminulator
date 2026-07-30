@@ -4,14 +4,16 @@
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 15 / 42 closed — every CRITICAL and every HIGH is done, plus CI.**
+**Progress: 17 / 42 closed — every CRITICAL, every HIGH, plus CI and the
+`tui.go` split.**
 [C1](#c1) ✅ [C2](#c2) ✅ [C3](#c3) ✅ · [H1](#h1) ✅ [H2](#h2) ✅ [H3](#h3) ✅
 [H4](#h4) ✅ [H5](#h5) ✅ [H6](#h6) ✅ [H7](#h7) ✅ · [M1](#m1) ✅ [M5](#m5) ✅
 [M14](#m14) ✅ · [N1](#n1) ✅
 
-What remains is MEDIUM and below: mostly structure ([M3](#m3) the `tui.go`
-split, [M12](#m12) table-driven tools) and robustness ([M7](#m7) SQLite pragmas,
-[M8](#m8) duplicate Plane issues).
+What remains is MEDIUM and below: [M12](#m12) table-driven tools, [M11](#m11)
+shared adapter factory, and robustness ([M7](#m7) SQLite pragmas, [M8](#m8)
+duplicate Plane issues, which [M7](#m7) makes more likely), then the
+[L1–L14](#low) cleanup.
 
 Suite green after every fix, `vet` and `gofmt` clean. **Every closed item ships
 with a test that was verified to fail against the old code** — reverted in place
@@ -73,7 +75,7 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | [H7](#h7) | ✅ | HIGH | `pushSync` discards Plane errors with zero signal |
 | [M1](#m1) | ✅ | MEDIUM | `config.json` is world-readable and written non-atomically |
 | [M2](#m2) | ⬜ | MEDIUM | `/key` echoes the secret and keeps it in input history |
-| [M3](#m3) | ⬜ | MEDIUM | `tui.go` is a 2503-line god-object |
+| [M3](#m3) | ✅ | MEDIUM | `tui.go` is a 2503-line god-object |
 | [M4](#m4) | ⬜ | MEDIUM | `send_daily` advertised to the LLM without Telegram configured |
 | [M5](#m5) | ✅ | MEDIUM | `dayFrom` swallows bad dates; slash path rejects them |
 | [M6](#m6) | ⬜ | MEDIUM | `Dispatch` is exported with no nil-dependency guards |
@@ -736,7 +738,7 @@ doesn't extend to the chat command.
 
 **Fix:** mask the echo and skip `pushHistory` for `/key`.
 
-### M3 — `tui.go` is a 2503-line god-object {#m3}
+### M3 — `tui.go` is a 2503-line god-object {#m3} ✅ DONE
 
 **Where:** `internal/tui/tui.go`
 
@@ -748,7 +750,52 @@ persistence, suggestions, and layout. Longest functions: `runCommand` (206 lines
 
 Combined with 29.5% coverage, this is where regressions will come from.
 
-**Proposed split** (same package, pure file-boundary move, no behavior change):
+**Fix applied — `tui.go` went from 2531 lines to 99, across 13 new files.**
+Landed after [M13](#m13) on purpose, so a ~2400-line mechanical move had an
+automated gate under it rather than someone remembering to run the suite.
+
+| File | Lines | | File | Lines |
+| ---- | ----- | - | ---- | ----- |
+| `commands.go` | 299 | | `keys.go` | 167 |
+| `mentions.go` | 284 | | `selection.go` | 156 |
+| `model.go` | 252 | | `providers.go` | 151 |
+| `daily.go` | 239 | | `chat.go` | 136 |
+| `todo.go` | 236 | | `task.go` | 122 |
+| `render.go` | 208 | | `conversations.go` | 116 |
+| `suggestions.go` | 202 | | `tui.go` | 99 |
+
+**How a pure move was proved, rather than asserted:** the sorted set of
+top-level declarations was captured before and after and diffed — **118 before,
+118 after, byte-identical**. I re-ran that check independently against
+`git show HEAD:internal/tui/tui.go` rather than trusting the report. The
+implementer additionally ran a multiset comparison of every non-blank body line
+(2320 before, 2320 after, zero missing, zero extra).
+
+**No test file was touched.** Tests live in the same package, so a genuine move
+cannot require editing one — needing to is the signal that something other than
+a move happened. Verified via `git status`.
+
+Nothing was renamed, no signature changed, and nothing suspected of being dead
+was removed *during the move*. Findings spotted along the way were reported, not
+acted on — see the cleanup commit that followed, which closed [L2](#low)
+separately.
+
+**Deliberate deviation, reported:** six top-level `// --- section ---` separator
+comments were folded into the new per-file header comments instead of carried.
+One of them (`// --- mouse selection & clipboard ---`) would have been actively
+wrong, since the declarations directly beneath it in the monolith
+(`copiedMsg`/`tickMsg`/`spinnerTick`) belong to `model.go`, not `selection.go`.
+Three separators that still divide groups *inside* a single file were kept
+verbatim.
+
+Verified: build, vet, `gofmt`, full suite, and `internal/tui` under `-race`.
+
+**Next in this file, if there is a sequel:** `commands.go` is the fattest at 299
+lines, 211 of which are the single `runCommand` switch.
+
+---
+
+**Original proposed split** (superseded by the table above, kept for the record):
 
 | New file | From `tui.go` | Contents |
 | -------- | ------------- | -------- |
@@ -1014,7 +1061,7 @@ completeness.
 | ID | Where | Item |
 | -- | ----- | ---- |
 | L1 | `tui.go` ×25 (`1003, 1015, 1030, 1110, 1249, 1385, 1506, 1520, 1544, 1601, …`) | The `if err != nil { m.add("err", …); return }` idiom is duplicated 25 times while the existing `report()` helper (`1062-1068`) is used only 4 times. |
-| L2 | `tui.go:75, 80-86, 2434` | Nine lines of commented-out code referencing `inputBG`, an identifier that no longer exists anywhere — it would not even compile if uncommented. Dead remnant of a reverted theme. |
+| L2 ✅ | `tui.go:75, 80-86, 2434` | ~~Nine lines of commented-out code referencing `inputBG`, an identifier that no longer exists anywhere — it would not even compile if uncommented. Dead remnant of a reverted theme.~~ **Done**, together with two duplicated doc comments left on `syncAll` and `sendDaily` when [C1b](#c1) moved them off the event loop. Cleaned in a commit separate from the [M3](#m3) move, so the move stayed pure. |
 | L3 | `plane/syncer.go:17` | Comment says `stateDefaults` is "reserved for state mapping" (it is actively used at `114-116`) and that it holds state **names** (it holds **ids** — `config.go:23`, `tui/config.go:270`). Wrong on both counts. |
 | L4 | `main.go:106` | `usage()` advertises a stale command subset — missing `/state`, `/drop`, `/sync`, `/pull`, `/project`, `/person`, `/fav`. |
 | L5 | README:25-30, 88-100 | Undocumented: `/todos`, `/exit`, `/q` aliases; `ctrl+u`/`ctrl+d` scroll; `ctrl+p`/`ctrl+n` menu nav; `planner chat`; `planner -h`; the `/state` picker keys. (No documented-but-missing commands — every README command resolves.) |
@@ -1100,9 +1147,9 @@ Recorded so future audits don't re-litigate these:
 7. ✅ **[M13](#m13) CI** — moved ahead of the structural work on purpose: [M3](#m3)
    is a ~2400-line mechanical refactor, and it should land against an automated
    gate rather than someone remembering to run the suite.
-8. **← NEXT · Structural:** [M3](#m3) file split, [M12](#m12) table-driven tools,
-   [M11](#m11) shared adapter factory. Pure refactors — land them behind the
-   tests added in steps 1–6 and the CI gate from step 7, never before.
+8. 🔧 **Structural:** ~~[M3](#m3) file split~~ done. **← NEXT:** [M12](#m12)
+   table-driven tools, [M11](#m11) shared adapter factory. Pure refactors — land
+   them behind the tests added in steps 1–6 and the CI gate from step 7.
 9. **Robustness leftovers:** [M7](#m7) SQLite pragmas, [M8](#m8) duplicate Plane
    issues (which [M7](#m7) makes more likely), [M9](#m9), [M10](#m10),
    [M15](#m15), then the [L1–L14](#low) cleanup and [N2](#n2).
