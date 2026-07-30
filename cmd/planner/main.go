@@ -10,6 +10,7 @@ import (
 	"github.com/webcloster-dev/planner/internal/agent"
 	"github.com/webcloster-dev/planner/internal/config"
 	"github.com/webcloster-dev/planner/internal/contextmgr"
+	"github.com/webcloster-dev/planner/internal/daily"
 	"github.com/webcloster-dev/planner/internal/llm"
 	"github.com/webcloster-dev/planner/internal/memory"
 	"github.com/webcloster-dev/planner/internal/plane"
@@ -19,7 +20,10 @@ import (
 	"github.com/webcloster-dev/planner/internal/tui"
 )
 
-const systemPrompt = `You are a personal PLANNING agent. Your ONLY job is to manage the user's task
+// systemPrompt is a var rather than a const because it embeds daily.FormatSpec:
+// the daily format has exactly one owner (internal/daily) and this prompt must
+// quote it, never restate it.
+var systemPrompt = `You are a personal PLANNING agent. Your ONLY job is to manage the user's task
 board — you do NOT do the work itself.
 
 Hard rules (never break these):
@@ -36,27 +40,9 @@ Dailies (work-day summaries):
   it once per day when combining several, e.g. today plus yesterday), then WRITE the summary
   yourself in this format and store it with save_daily(date, content):
 
-    **Daily:**  <YYYY-MM-DD>
+` + daily.FormatSpec + `
 
-    **Trabajo:**
-      - <acción concreta por tarea, en prosa nominalizada>
-
-    **Bloqueos:**
-      # <bloqueo, si lo hay>
-
-    **Notas:**
-      >> <observación o recomendación técnica>
-
-  Formato del contenido:
-  - Los títulos de sección van en negrita, tal cual el formato: **Daily:**, **Trabajo:**, **Bloqueos:**, **Notas:**.
-  - Los ítems de Trabajo usan el prefijo "  - " (guion). NUNCA uses "+": el "+" queda reservado
-    para las menciones de proyectos (+slug), así que confunde si aparece en el texto.
-  - Rodeá con backticks toda referencia a un proyecto, documento o acción concreta
-    (ej: ` + "`+liquida`, `migración de DNS`, `README.md`, `deploy a producción`" + `).
-  - Poné en negrita los títulos de tareas o proyectos que menciones, con **...**.
-  - Poné en itálica las observaciones y comentarios (el contenido de Notas), con __...__.
-
-  Omit any empty section. To edit: get_daily, change it, save_daily again. To show it: get_daily.
+  To edit: get_daily, change it, save_daily again. To show it: get_daily.
   Send it to Telegram with send_daily ONLY when the user explicitly asks.
 
 Behavior:

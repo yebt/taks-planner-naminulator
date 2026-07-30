@@ -7,12 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/webcloster-dev/planner/internal/daily"
 	"github.com/webcloster-dev/planner/internal/domain"
 	"github.com/webcloster-dev/planner/internal/store"
 )
 
 func TestBuildDaily(t *testing.T) {
-	date := dailyDate(time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC))
+	date := daily.Date(time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC))
 	if date != "2026-02-02 FEB" {
 		t.Fatalf("date header: %q", date)
 	}
@@ -23,7 +24,7 @@ func TestBuildDaily(t *testing.T) {
 			Details: domain.TaskDetails{TechNotes: "Usar VPN por restricción de IP"}},
 		{Type: domain.TypeFix, Title: "Descartada", Status: domain.StatusCancelled},
 	}
-	out := buildDaily(date, tasks)
+	out := daily.Build(date, tasks)
 	for _, want := range []string{
 		"**Daily:**  2026-02-02 FEB",
 		"**Trabajo:**",
@@ -223,7 +224,7 @@ func hasRawContaining(entries []entry, want string) bool {
 }
 
 func TestBuildDailyEmpty(t *testing.T) {
-	out := buildDaily("2026-02-02 FEB", nil)
+	out := daily.Build("2026-02-02 FEB", nil)
 	if !strings.Contains(out, "sin actividad") {
 		t.Fatalf("empty daily should note no activity, got: %s", out)
 	}

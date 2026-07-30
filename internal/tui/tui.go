@@ -23,6 +23,7 @@ import (
 
 	"github.com/webcloster-dev/planner/internal/agent"
 	"github.com/webcloster-dev/planner/internal/config"
+	"github.com/webcloster-dev/planner/internal/daily"
 	"github.com/webcloster-dev/planner/internal/domain"
 	"github.com/webcloster-dev/planner/internal/llm"
 	"github.com/webcloster-dev/planner/internal/memory"
@@ -1362,36 +1363,6 @@ func (m *chatModel) dropTask(ctx context.Context, id int64, withSync bool) {
 	m.report("dropped: ", out, err)
 }
 
-// dailyPrompt is the "skill" that shapes the daily: it turns the day's tasks
-// into a professional Spanish narrative with the fixed Trabajo/Bloqueos/Notas
-// layout and the +/#/>> markers.
-const dailyPrompt = `Sos un asistente que redacta el "daily" de trabajo de un desarrollador a partir de sus tareas del día.
-Escribí en español neutro-profesional, en prosa nominalizada (ej: "Identificación de anomalías en la ejecución de CRONs...", "Validación del proceso de migración...").
-No copies los títulos tal cual: reformulálos como acciones concretas y claras. No inventes tareas que no estén en la lista.
-
-Devolvé EXACTAMENTE este formato:
-
-**Daily:**  <FECHA>
-
-**Trabajo:**
-  - <una línea por cada tarea trabajada, hecha o en progreso>
-
-**Bloqueos:**
-  # <una línea por cada bloqueo>
-
-**Notas:**
-  >> <observaciones o recomendaciones técnicas relevantes>
-
-Reglas:
-- Usá <FECHA> tal como te la paso.
-- Prefijos exactos: "  - ", "  # ", "  >> ".
-- Los títulos de sección van en negrita, tal cual el formato: **Daily:**, **Trabajo:**, **Bloqueos:**, **Notas:**.
-- El prefijo de Trabajo es "  - " (guion). NUNCA uses "+": queda reservado para las menciones de proyectos (+slug).
-- Rodeá con backticks toda referencia a un proyecto, documento o acción concreta (ej: ` + "`+liquida`" + `, ` + "`migración de DNS`" + `, ` + "`README.md`" + `).
-- Poné en negrita los títulos de tareas o proyectos que menciones, con **...**.
-- Poné en itálica las observaciones y comentarios (el contenido de Notas), con __...__.
-- Si una sección no tiene contenido, omitila por completo (incluyendo su título).`
-
 // handleDaily routes the /daily verbs: "edit"/"send" (optional date), otherwise
 // the first token is an optional date and the rest an optional LLM instruction.
 func (m *chatModel) handleDaily(ctx context.Context, fields []string) tea.Cmd {
@@ -1462,7 +1433,7 @@ func (m *chatModel) generateDailyCmd(ctx context.Context, day time.Time, instruc
 		m.add("err", err.Error())
 		return nil
 	}
-	date := dailyDate(day)
+	date := daily.Date(day)
 	dateKey := day.Format("2006-01-02")
 	prior := ""
 	if m.deps.Dailies != nil {
@@ -1475,12 +1446,12 @@ func (m *chatModel) generateDailyCmd(ctx context.Context, day time.Time, instruc
 	m.add("sys", "generating daily for "+date+"…")
 	m.layout()
 	userMsg := serializeTasksForDaily(date, tasks, prior, instruction)
-	return tea.Batch(dailyCmd(m.deps.Agent, dateKey, userMsg, buildDaily(date, tasks), prior), spinnerTick())
+	return tea.Batch(dailyCmd(m.deps.Agent, dateKey, userMsg, daily.Build(date, tasks), prior), spinnerTick())
 }
 
 func dailyCmd(a *agent.Agent, dateKey, userMsg, fallback, prior string) tea.Cmd {
 	return func() tea.Msg {
-		out, err := a.Oneshot(context.Background(), dailyPrompt, userMsg)
+		out, err := a.Oneshot(context.Background(), daily.Prompt, userMsg)
 		return dailyMsg{dateKey: dateKey, text: out, fallback: fallback, prior: prior, err: err}
 	}
 }
@@ -1510,12 +1481,6 @@ func serializeTasksForDaily(date string, tasks []domain.Task, prior, instruction
 		b.WriteString("\nModificación solicitada: " + instruction + "\n")
 	}
 	return b.String()
-}
-
-// dailyDate formats a date as "2006-01-02 MON" with a Spanish month abbrev.
-func dailyDate(t time.Time) string {
-	months := []string{"ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"}
-	return t.Format("2006-01-02") + " " + months[int(t.Month())-1]
 }
 
 // draftFor returns the current in-memory draft for dateKey, or the stored one.
@@ -1637,46 +1602,6 @@ func (m *chatModel) resumeLast(ctx context.Context) {
 		return
 	}
 	m.loadConversation(ctx, strconv.FormatInt(convs[0].ID, 10))
-}
-
-// buildDaily is the deterministic fallback digest (used when the LLM call
-// fails): work items (-), blocks (#) and notes (>>) under the fixed layout.
-func buildDaily(date string, tasks []domain.Task) string {
-	var b strings.Builder
-	b.WriteString("**Daily:**  " + date + "\n")
-	var work, notes []string
-	for _, t := range tasks {
-		if t.Status == domain.StatusCancelled {
-			continue
-		}
-		code := ""
-		if t.WorkItemSeq > 0 {
-			code = fmt.Sprintf("#%d ", t.WorkItemSeq)
-		}
-		work = append(work, fmt.Sprintf("[%s] %s%s", t.Type, code, t.Title))
-		if n := strings.TrimSpace(t.Details.TechNotes); n != "" {
-			notes = append(notes, n)
-		}
-	}
-	section := func(title, prefix string, items []string) {
-		if len(items) == 0 {
-			return
-		}
-		b.WriteString("\n**" + title + ":**\n")
-		for _, it := range items {
-			b.WriteString("  " + prefix + " " + it + "\n")
-		}
-	}
-	// The deterministic fallback fills Trabajo and Notas; Bloqueos is left to the
-	// LLM daily (there is no "blocked" status — that lives in context).
-	section("Trabajo", "-", work)
-	section("Notas", ">>", notes)
-	if len(tasks) == 0 {
-		// No "hoy" here: the digest is built for whatever date was asked for,
-		// and it already carries that date in its header.
-		b.WriteString("\n(sin actividad registrada)")
-	}
-	return strings.TrimRight(b.String(), "\n")
 }
 
 // --- projects & people ---
