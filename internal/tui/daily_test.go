@@ -104,9 +104,10 @@ func TestDailyShow(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The entry keeps the source markup; rendering happens at display time.
 	m.handleDaily(ctx, []string{"/daily", "show", "2026-07-07"})
-	if !hasRawContaining(m.entries, "deploy a `producción`") {
-		t.Fatalf("show should print the stored daily verbatim; entries=%+v", m.entries)
+	if !hasRoleContaining(m.entries, "daily", "deploy a `producción`") {
+		t.Fatalf("show should keep the stored daily verbatim; entries=%+v", m.entries)
 	}
 
 	// A missing daily errors read-only; it must NOT regenerate.
@@ -115,7 +116,7 @@ func TestDailyShow(t *testing.T) {
 	if !hasRole(m.entries, "err") {
 		t.Fatalf("show of a missing daily should error; entries=%+v", m.entries)
 	}
-	if hasRole(m.entries, "raw") {
+	if hasRole(m.entries, "daily") {
 		t.Fatalf("show of a missing daily should not print content; entries=%+v", m.entries)
 	}
 }
@@ -212,15 +213,6 @@ func TestDailyFailureWithoutPriorUsesFallback(t *testing.T) {
 	if got.Content != fallback {
 		t.Fatalf("fallback should be stored when there is no prior draft: %q", got.Content)
 	}
-}
-
-func hasRawContaining(entries []entry, want string) bool {
-	for _, e := range entries {
-		if e.role == "raw" && strings.Contains(e.text, want) {
-			return true
-		}
-	}
-	return false
 }
 
 func TestBuildDailyEmpty(t *testing.T) {

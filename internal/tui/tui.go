@@ -304,7 +304,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.dailyDraft = prior
 				m.dailyDraftDate = msg.dateKey
 				m.add("err", "daily generation failed ("+why+") — the stored daily is untouched")
-				m.add("raw", prior)
+				m.add("daily", prior)
 				m.add("sys", "daily ("+msg.dateKey+") unchanged — /daily edit to tweak, /daily send to deliver.")
 				m.layout()
 				return m, nil
@@ -314,7 +314,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.dailyDraft = text
 		m.dailyDraftDate = msg.dateKey
-		m.add("raw", text)
+		m.add("daily", text)
 		if err := m.persistDaily(msg.dateKey, text); err != nil {
 			m.add("err", "daily generated but NOT saved: "+err.Error())
 		} else {
@@ -1517,7 +1517,7 @@ func (m *chatModel) showDaily(ctx context.Context, day time.Time) {
 		m.add("err", "no daily for "+dateKey+" — run /daily "+dateKey+" first")
 		return
 	}
-	m.add("raw", content)
+	m.add("daily", content)
 	m.add("sys", "daily "+dateKey+" · /daily edit "+dateKey+" to tweak · /daily send "+dateKey+" to deliver")
 }
 
@@ -2388,6 +2388,10 @@ func (m *chatModel) setContent() {
 			blocks = append(blocks, body.Inherit(errStyle).Render("⚠ "+e.text))
 		case "warn":
 			blocks = append(blocks, body.Inherit(warnStyle).Render("⚠ "+e.text))
+		case "daily":
+			// Model-authored markup: paint it and wrap it. Unlike "raw" below,
+			// nothing has pre-formatted this text to the viewport width.
+			blocks = append(blocks, body.Render(renderMarkup(e.text)))
 		case "raw":
 			blocks = append(blocks, e.text) // pre-styled/wrapped, passthrough
 		default:
