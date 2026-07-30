@@ -4,9 +4,13 @@
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 10 / 41 closed — all three CRITICALs are done.**
+**Progress: 12 / 42 closed — all three CRITICALs and 5 of 7 HIGHs are done.**
 [C1](#c1) ✅ · [C2](#c2) ✅ · [C3](#c3) ✅ · [H1](#h1) ✅ · [H2](#h2) ✅ ·
-[H6](#h6) ✅ · [M1](#m1) ✅ · [M5](#m5) ✅ · [M14](#m14) ✅ · [N1](#n1) ✅
+[H4](#h4) ✅ · [H5](#h5) ✅ · [H6](#h6) ✅ · [M1](#m1) ✅ · [M5](#m5) ✅ ·
+[M14](#m14) ✅ · [N1](#n1) ✅
+
+Still open at HIGH: [H3](#h3) (Telegram 4096-char limit) and [H7](#h7)
+(`pushSync` swallows Plane errors).
 
 Suite green after every fix, `vet` and `gofmt` clean. **Every closed item ships
 with a test that was verified to fail against the old code** — reverted in place
@@ -62,8 +66,8 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | [H1](#h1) | ✅ | HIGH | Telegram bot token leaks on screen through `*url.Error` |
 | [H2](#h2) | ✅ | HIGH | Local-vs-UTC day boundary mismatch |
 | [H3](#h3) | ⬜ | HIGH | No Telegram 4096-char handling — long dailies never deliver |
-| [H4](#h4) | ⬜ | HIGH | TUI never renders the markup it asks the LLM to produce |
-| [H5](#h5) | ⬜ | HIGH | Daily format spec forked three ways, already drifted |
+| [H4](#h4) | ✅ | HIGH | TUI never renders the markup it asks the LLM to produce |
+| [H5](#h5) | ✅ | HIGH | Daily format spec forked three ways, already drifted |
 | [H6](#h6) | ✅ | HIGH | Malformed tool-call JSON silently swallowed in 4 handlers |
 | [H7](#h7) | ⬜ | HIGH | `pushSync` discards Plane errors with zero signal |
 | [M1](#m1) | ✅ | MEDIUM | `config.json` is world-readable and written non-atomically |
@@ -82,6 +86,7 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | [M14](#m14) | ✅ | MEDIUM | `buildDaily` hardcodes "hoy" for every date |
 | [M15](#m15) | ⬜ | MEDIUM | No `list_dailies` tool — README oversells conversational parity |
 | [N1](#n1) | ✅ | MEDIUM | `persistDaily` discards the save error — "daily ready" can be a lie |
+| [N2](#n2) | ⬜ | LOW | Startup warnings show their backticks literally |
 | [L1–L14](#low) | ⬜ | LOW | Cleanup, docs drift, cosmetics |
 
 Findings discovered *during* remediation are filed under [New findings](#new)
@@ -414,7 +419,7 @@ sequentially, or truncate with an explicit `…(truncated)` marker. Test with a
 
 ---
 
-### H4 — TUI never renders the markup it asks the LLM to produce {#h4}
+### H4 — TUI never renders the markup it asks the LLM to produce {#h4} ✅ DONE
 
 **Where:** `internal/tui/tui.go:2371-2372` (`setContent`, `case "raw"`), `263`, `1472`; `go.mod` (no glamour)
 
@@ -437,13 +442,47 @@ Two consequences:
    character-granular selection mapping (`contentLines`, `tui.go:2379`) — click-drag
    selection silently selects the wrong text.
 
-**Fix:** render the CommonMark subset with lipgloss at display time (mirroring
-`markup.go`'s regex set), and wrap `raw` blocks to the viewport width. Point 2 is
-a correctness bug independent of point 1 and should be fixed either way.
+**Fix applied:** a new `"daily"` entry role, rendered and wrapped:
+
+```go
+case "daily":
+    blocks = append(blocks, body.Render(renderMarkup(e.text)))
+```
+
+`renderMarkup` (`internal/tui/markup.go`) mirrors `internal/telegram/markup.go`
+exactly — same three constructs, same code-spans-to-placeholders-first ordering
+so `` `**x**` `` stays literal — with lipgloss as the output target instead of
+HTML. The two files carry a note pointing at each other; adding a construct to
+one means adding it to the other.
+
+**Why a new role rather than changing `"raw"`:** `"raw"` has ten call sites and
+nine of them (task detail, projects, people, the dailies list) really *are*
+pre-styled lipgloss tables that must pass through untouched. Only the daily is
+model-authored. Running a markdown pass over the other nine would have corrupted
+them. Splitting the role fixes the daily without touching anything else.
+
+`entry.text` still holds the **source** markup — rendering happens at display
+time — so editing, storing and sending are all unaffected.
+
+**Landed in:** `internal/tui/markup.go` (new), `internal/tui/tui.go`
+(`setContent`, the three daily call sites)
+
+**Tests added** (`internal/tui/markup_test.go`):
+- `TestRenderMarkupRemovesMarkers` — table-driven over the three constructs.
+- `TestRenderMarkupKeepsMarkersInsideCodeSpans` — the re-parse guard.
+- `TestRenderMarkupKeepsDailyHeader`.
+- `TestDailyEntryIsWrappedToViewport` — no `contentLines` entry exceeds the
+  viewport width. This is the point-2 correctness bug, tested independently.
+- `TestDailyEntryRendersWithoutMarkers` — end-to-end, no marker reaches the screen.
+
+The assertions read **ANSI-stripped** output on purpose: lipgloss emits no escape
+codes when it detects no colour profile (as in CI), so asserting on the codes
+themselves would make the tests pass or fail by environment. What must hold
+everywhere is that the markers are gone and the text survives.
 
 ---
 
-### H5 — Daily format spec forked three ways, already drifted {#h5}
+### H5 — Daily format spec forked three ways, already drifted {#h5} ✅ DONE
 
 **Where:** `cmd/planner/main.go:39-60` (`systemPrompt`), `internal/tui/tui.go:1300-1319` (`dailyPrompt`), `internal/tui/tui.go:1556-1590` (`buildDaily`)
 
@@ -464,9 +503,53 @@ Three independent owners of one specification. What matches: the prefixes
 already failed. Any future format change requires remembering three files across
 two packages.
 
-**Fix:** one `internal/daily` package owning the spec: the prefix constants, the
-prompt text (composed, not duplicated), and the fallback builder. Both `main.go`
-and `tui.go` consume it. This collapses A–F into a single source of truth.
+**Fix applied:** a new `internal/daily` package owns the format outright.
+
+The key move: **`FormatSpec` is assembled by const concatenation of the very
+prefix and title constants `Build` uses.** The prose spec and the builder are
+not "kept in sync" — they are physically incapable of disagreeing about what a
+prefix is. `Prompt` (the `/daily` one-shot) embeds `FormatSpec` rather than
+restating it, and `cmd/planner`'s `systemPrompt` became a `var` that does the
+same.
+
+API: `PrefixWork`/`PrefixBlock`/`PrefixNote`, `TitleDaily`/`TitleWork`/
+`TitleBlocks`/`TitleNotes`, `FormatSpec`, `Prompt`, `Date(time.Time) string`,
+`Build(date string, tasks []domain.Task) string`. Only import: `internal/domain`.
+
+**Divergences resolved — the fuller version won every time:**
+
+| | Resolution |
+| - | ---------- |
+| A | Canonical header is `**Daily:**  <FECHA>` in `Date()` format. `FormatSpec` now states the format explicitly with an example, so the agent path can derive it (it has no injected value); `/daily` still pins the exact value. |
+| B | Exact-prefix rule kept, generated from the constants. |
+| C | The 4-example backtick list wins (`deploy a producción` restored). |
+| D | The full two-line `+` warning wins. |
+| E | The explicit Spanish empty-section rule wins. |
+| F | "No copies los títulos tal cual" promoted into `FormatSpec`, so the agent path gets it too. |
+
+**Divergence F′ (the fallback implements ~40% of the spec) was deliberately not
+"fixed".** `Build` cannot produce backticks, bold task titles or nominalized
+prose — those need judgement about what a task *means*. Faking them would yield
+output that looks compliant while being wrong. Instead `Build`'s doc comment
+states it is structural-only and says why. Honesty over a cosmetic fix.
+
+**Landed in:** `internal/daily/daily.go` (new); `cmd/planner/main.go` (−22 lines
+of restated format); `internal/tui/tui.go` (`dailyPrompt`, `dailyDate`,
+`buildDaily` deleted, −73 lines).
+
+`internal/tui/daily_test.go` changed **call sites only** — `dailyDate(…)` →
+`daily.Date(…)`, `buildDaily(…)` → `daily.Build(…)`. No assertion was touched;
+`TestBuildDaily` and `TestBuildDailyEmpty` assert the same strings and pass.
+
+**Tests added:** `TestBuildUsesExportedPrefixes`,
+`TestFormatSpecMentionsEveryTitleAndPrefix`, `TestPromptEmbedsFormatSpec`,
+`TestDateUsesSpanishMonthAbbreviation` (`internal/daily`), and
+`TestSystemPromptEmbedsDailyFormatSpec` (`cmd/planner`).
+
+**That last test is the one that matters**, and its teeth were verified: with
+`systemPrompt` re-forked to an inline copy of the spec, **the code still
+compiled cleanly**. Nothing but that test caught it. A re-fork is invisible to
+the compiler — which is exactly how this drifted in the first place.
 
 ---
 
@@ -802,6 +885,23 @@ daily-edit key handler)
 `SaveDaily` always fails; asserts the error is surfaced **and** that the "ready"
 line is not printed.
 
+### N2 — startup warnings show their backticks literally {#n2}
+
+**Where:** `internal/tui/tui.go` — the startup banner entries added around
+`tui.go:112-118`, rendered under the `warn` role.
+
+Surfaced while testing [H4](#h4): the Plane/Telegram "not configured" warnings
+are written with backticks (``set it in `planner config` → Plane``) and the
+`warn` role does not render markup, so the backticks appear on screen.
+
+Cosmetic only, and deliberately **not** folded into H4 — that finding is about
+model-authored daily content, and quietly widening `renderMarkup` to other roles
+is how the `"raw"` role got overloaded in the first place. The fix is a decision
+about which roles are markup-bearing, which is worth making explicitly.
+
+**Failure scenario:** none beyond a slightly scruffy first screen. Filed for
+completeness.
+
 ---
 
 ## LOW {#low}
@@ -887,10 +987,12 @@ Recorded so future audits don't re-litigate these:
    ~~[M14](#m14)~~ — all done.
 3. ✅ **Unfreeze the UI:** ~~[C1a](#c1)~~ (engram bounded), ~~[C1b](#c1)~~
    (blocking branches off the event loop), ~~[N1](#n1)~~ — all done.
-4. **Collapse the daily spec:** [H5](#h5) → one `internal/daily` package. Do this
-   *before* [H4](#h4), since the renderer should consume the same constants.
-5. **Then [H4](#h4)** (render + wrap), which also fixes the selection desync.
-6. **Structural:** [M3](#m3) file split, [M12](#m12) table-driven tools,
+4. ✅ **Collapse the daily spec:** ~~[H5](#h5)~~ → `internal/daily`. Done before
+   H4, as planned, so the renderer consumes the same constants.
+5. ✅ **Then [H4](#h4)** ~~(render + wrap)~~ — also fixed the selection desync.
+6. **← NEXT · Remaining HIGHs:** [H3](#h3) (chunk or truncate long dailies) and
+   [H7](#h7) (make failed Plane pushes visible). Both are small and independent.
+7. **Structural:** [M3](#m3) file split, [M12](#m12) table-driven tools,
    [M11](#m11) shared adapter factory. Pure refactors — land them behind the
    tests added in steps 1–2, never before.
-7. **[M13](#m13) CI last**, so it locks in everything above.
+8. **[M13](#m13) CI last**, so it locks in everything above.
