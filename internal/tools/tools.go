@@ -85,10 +85,28 @@ func (r *Registry) pushSync(ctx context.Context, t *domain.Task) error {
 	return r.sync.Push(ctx, t)
 }
 
-// Definitions returns the provider-agnostic tool schemas.
-func (r *Registry) Definitions() []llm.Tool {
-	defs := []llm.Tool{
-		{
+// toolDef is one tool: the schema advertised to the model, the condition under
+// which it is advertised, and the handler that executes it. The tool's identity
+// is Def.Name — there is deliberately no second Name field, because two copies
+// of the name would be one more thing to keep in sync by hand.
+type toolDef struct {
+	// Def is the provider-agnostic schema sent to the LLM.
+	Def llm.Tool
+	// Enabled gates whether the tool is advertised. nil means always advertised.
+	// It gates Definitions only: Dispatch stays reachable for every tool, as it
+	// has always been — the handlers that need a backend check it themselves.
+	Enabled func(*Registry) bool
+	// Handler executes the call. Never nil; TestToolTableIsWellFormed enforces it.
+	Handler func(*Registry, context.Context, string) (string, error)
+}
+
+// toolTable is the single source of truth for the tool set. Both Definitions
+// (what the model is told exists) and Dispatch (what actually runs) are derived
+// from it, so a tool cannot be advertised without a handler, nor carry a handler
+// that is never advertised. Adding a tool means adding one entry here.
+var toolTable = []toolDef{
+	{
+		Def: llm.Tool{
 			Name:        "create_task",
 			Description: "Create a new task in the local planner. Use when the user starts or mentions new work.",
 			Parameters: obj(props{
@@ -102,14 +120,20 @@ func (r *Registry) Definitions() []llm.Tool {
 				"project":     strProp("Linked project slug when the task belongs to a mentioned +project"),
 			}, "type", "title"),
 		},
-		{
+		Handler: (*Registry).createTask,
+	},
+	{
+		Def: llm.Tool{
 			Name:        "list_tasks",
 			Description: "List local tasks, optionally filtered by status.",
 			Parameters: obj(props{
 				"status": enumProp("Optional status filter", statuses()...),
 			}),
 		},
-		{
+		Handler: (*Registry).listTasks,
+	},
+	{
+		Def: llm.Tool{
 			Name:        "set_status",
 			Description: "Move a task between Plane's 5 state groups (backlog, unstarted, started, completed, cancelled).",
 			Parameters: obj(props{
@@ -117,7 +141,10 @@ func (r *Registry) Definitions() []llm.Tool {
 				"status": enumProp("New status — one of Plane's 5 state groups", statuses()...),
 			}, "id", "status"),
 		},
-		{
+		Handler: (*Registry).setStatus,
+	},
+	{
+		Def: llm.Tool{
 			Name:        "set_state",
 			Description: "Set the concrete Plane state name for a task (e.g. 'In Progress', 'Devuelto por Calidad') within its group.",
 			Parameters: obj(props{
@@ -125,7 +152,10 @@ func (r *Registry) Definitions() []llm.Tool {
 				"state": strProp("Plane state name, e.g. 'In Progress'"),
 			}, "id", "state"),
 		},
-		{
+		Handler: (*Registry).setState,
+	},
+	{
+		Def: llm.Tool{
 			Name:        "set_details",
 			Description: "Enrich a task with activity-template fields. Only the fields you pass are updated.",
 			Parameters: obj(props{
@@ -142,142 +172,169 @@ func (r *Registry) Definitions() []llm.Tool {
 				"due_date":            strProp("Plane due date (target date), YYYY-MM-DD"),
 			}, "id"),
 		},
-		{
+		Handler: (*Registry).setDetails,
+	},
+	{
+		Def: llm.Tool{
 			Name:        "drop_task",
 			Description: "Delete a task from the planner permanently.",
 			Parameters:  obj(props{"id": intProp("Task id")}, "id"),
 		},
+		Handler: (*Registry).dropTask,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "recall_memory",
+			Description: "Search long-term memory for relevant past notes, decisions, or context.",
+			Parameters: obj(props{
+				"query": strProp("What to search for"),
+				"limit": intProp("Max results (default 5)"),
+			}, "query"),
+		},
+		Enabled: (*Registry).memEnabled,
+		Handler: (*Registry).recallMemory,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "remember_note",
+			Description: "Save an important fact or decision to long-term memory for later recall.",
+			Parameters: obj(props{
+				"title":   strProp("Short title"),
+				"content": strProp("The note to remember"),
+			}, "title", "content"),
+		},
+		Enabled: (*Registry).memEnabled,
+		Handler: (*Registry).rememberNote,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "upsert_project",
+			Description: "Create or update a project (referenced as +slug). Pass only the fields you want to set.",
+			Parameters: obj(props{
+				"slug":        strProp("Project slug (the +slug identifier)"),
+				"name":        strProp("Human name"),
+				"description": strProp("Short summary: stack, purpose, constraints"),
+			}, "slug"),
+		},
+		Enabled: (*Registry).ctxEnabled,
+		Handler: (*Registry).upsertProject,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "add_project_note",
+			Description: "Append context to a project: info, a decision made, or a change that happened.",
+			Parameters: obj(props{
+				"slug": strProp("Project slug"),
+				"kind": enumProp("Note kind", "info", "decision", "change"),
+				"text": strProp("The note"),
+			}, "slug", "text"),
+		},
+		Enabled: (*Registry).ctxEnabled,
+		Handler: (*Registry).addProjectNote,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "upsert_person",
+			Description: "Create or update a person (referenced as @nick). Pass only the fields you want to set.",
+			Parameters: obj(props{
+				"nick": strProp("Person nick (the @nick identifier)"),
+				"name": strProp("Full name"),
+				"role": strProp("Area / role, e.g. 'área comercial'"),
+			}, "nick"),
+		},
+		Enabled: (*Registry).ctxEnabled,
+		Handler: (*Registry).upsertPerson,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "add_person_note",
+			Description: "Append context about a person: info, a decision, or a change.",
+			Parameters: obj(props{
+				"nick": strProp("Person nick"),
+				"kind": enumProp("Note kind", "info", "decision", "change"),
+				"text": strProp("The note"),
+			}, "nick", "text"),
+		},
+		Enabled: (*Registry).ctxEnabled,
+		Handler: (*Registry).addPersonNote,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "list_day_tasks",
+			Description: "List the tasks worked on a given day (material to write a daily). Call once per day when combining several.",
+			Parameters: obj(props{
+				"day": strProp("today | yesterday | hoy | ayer | YYYY-MM-DD (default today)"),
+			}),
+		},
+		Enabled: (*Registry).dailiesEnabled,
+		Handler: (*Registry).listDayTasks,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "save_daily",
+			Description: "Store the daily digest you wrote for a date (creates or overwrites it).",
+			Parameters: obj(props{
+				"date":    strProp("today | yesterday | YYYY-MM-DD"),
+				"content": strProp("The full daily text you composed"),
+			}, "date", "content"),
+		},
+		Enabled: (*Registry).dailiesEnabled,
+		Handler: (*Registry).saveDaily,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "get_daily",
+			Description: "Read back the stored daily for a date (to show or edit it).",
+			Parameters:  obj(props{"date": strProp("today | yesterday | YYYY-MM-DD")}, "date"),
+		},
+		Enabled: (*Registry).dailiesEnabled,
+		Handler: (*Registry).getDaily,
+	},
+	{
+		// M4: this should also require a configured Telegram sender. Gating it is a
+		// behaviour change and lands on its own; the fix is this Enabled func.
+		Def: llm.Tool{
+			Name:        "send_daily",
+			Description: "Send the stored daily for a date to Telegram. Only when the user asks.",
+			Parameters:  obj(props{"date": strProp("today | yesterday | YYYY-MM-DD")}, "date"),
+		},
+		Enabled: (*Registry).dailiesEnabled,
+		Handler: (*Registry).sendDaily,
+	},
+}
+
+// toolsByName indexes toolTable for dispatch. Derived from the same table the
+// definitions come from, so the two lists cannot drift apart.
+var toolsByName = indexTools(toolTable)
+
+func indexTools(table []toolDef) map[string]*toolDef {
+	m := make(map[string]*toolDef, len(table))
+	for i := range table {
+		m[table[i].Def.Name] = &table[i]
 	}
-	if r.memEnabled() {
-		defs = append(defs,
-			llm.Tool{
-				Name:        "recall_memory",
-				Description: "Search long-term memory for relevant past notes, decisions, or context.",
-				Parameters: obj(props{
-					"query": strProp("What to search for"),
-					"limit": intProp("Max results (default 5)"),
-				}, "query"),
-			},
-			llm.Tool{
-				Name:        "remember_note",
-				Description: "Save an important fact or decision to long-term memory for later recall.",
-				Parameters: obj(props{
-					"title":   strProp("Short title"),
-					"content": strProp("The note to remember"),
-				}, "title", "content"),
-			},
-		)
-	}
-	if r.ctxEnabled() {
-		defs = append(defs,
-			llm.Tool{
-				Name:        "upsert_project",
-				Description: "Create or update a project (referenced as +slug). Pass only the fields you want to set.",
-				Parameters: obj(props{
-					"slug":        strProp("Project slug (the +slug identifier)"),
-					"name":        strProp("Human name"),
-					"description": strProp("Short summary: stack, purpose, constraints"),
-				}, "slug"),
-			},
-			llm.Tool{
-				Name:        "add_project_note",
-				Description: "Append context to a project: info, a decision made, or a change that happened.",
-				Parameters: obj(props{
-					"slug": strProp("Project slug"),
-					"kind": enumProp("Note kind", "info", "decision", "change"),
-					"text": strProp("The note"),
-				}, "slug", "text"),
-			},
-			llm.Tool{
-				Name:        "upsert_person",
-				Description: "Create or update a person (referenced as @nick). Pass only the fields you want to set.",
-				Parameters: obj(props{
-					"nick": strProp("Person nick (the @nick identifier)"),
-					"name": strProp("Full name"),
-					"role": strProp("Area / role, e.g. 'área comercial'"),
-				}, "nick"),
-			},
-			llm.Tool{
-				Name:        "add_person_note",
-				Description: "Append context about a person: info, a decision, or a change.",
-				Parameters: obj(props{
-					"nick": strProp("Person nick"),
-					"kind": enumProp("Note kind", "info", "decision", "change"),
-					"text": strProp("The note"),
-				}, "nick", "text"),
-			},
-		)
-	}
-	if r.dailiesEnabled() {
-		defs = append(defs,
-			llm.Tool{
-				Name:        "list_day_tasks",
-				Description: "List the tasks worked on a given day (material to write a daily). Call once per day when combining several.",
-				Parameters: obj(props{
-					"day": strProp("today | yesterday | hoy | ayer | YYYY-MM-DD (default today)"),
-				}),
-			},
-			llm.Tool{
-				Name:        "save_daily",
-				Description: "Store the daily digest you wrote for a date (creates or overwrites it).",
-				Parameters: obj(props{
-					"date":    strProp("today | yesterday | YYYY-MM-DD"),
-					"content": strProp("The full daily text you composed"),
-				}, "date", "content"),
-			},
-			llm.Tool{
-				Name:        "get_daily",
-				Description: "Read back the stored daily for a date (to show or edit it).",
-				Parameters:  obj(props{"date": strProp("today | yesterday | YYYY-MM-DD")}, "date"),
-			},
-			llm.Tool{
-				Name:        "send_daily",
-				Description: "Send the stored daily for a date to Telegram. Only when the user asks.",
-				Parameters:  obj(props{"date": strProp("today | yesterday | YYYY-MM-DD")}, "date"),
-			},
-		)
+	return m
+}
+
+// Definitions returns the provider-agnostic tool schemas, keeping only the tools
+// whose backend is wired up.
+func (r *Registry) Definitions() []llm.Tool {
+	defs := make([]llm.Tool, 0, len(toolTable))
+	for _, t := range toolTable {
+		if t.Enabled != nil && !t.Enabled(r) {
+			continue
+		}
+		defs = append(defs, t.Def)
 	}
 	return defs
 }
 
 // Dispatch runs a tool by name with raw JSON arguments and returns a JSON result.
 func (r *Registry) Dispatch(ctx context.Context, name, args string) (string, error) {
-	switch name {
-	case "create_task":
-		return r.createTask(ctx, args)
-	case "list_tasks":
-		return r.listTasks(ctx, args)
-	case "set_status":
-		return r.setStatus(ctx, args)
-	case "set_state":
-		return r.setState(ctx, args)
-	case "set_details":
-		return r.setDetails(ctx, args)
-	case "drop_task":
-		return r.dropTask(ctx, args)
-	case "recall_memory":
-		return r.recallMemory(ctx, args)
-	case "remember_note":
-		return r.rememberNote(ctx, args)
-	case "upsert_project":
-		return r.upsertProject(ctx, args)
-	case "add_project_note":
-		return r.addProjectNote(ctx, args)
-	case "upsert_person":
-		return r.upsertPerson(ctx, args)
-	case "add_person_note":
-		return r.addPersonNote(ctx, args)
-	case "list_day_tasks":
-		return r.listDayTasks(ctx, args)
-	case "save_daily":
-		return r.saveDaily(ctx, args)
-	case "get_daily":
-		return r.getDaily(ctx, args)
-	case "send_daily":
-		return r.sendDaily(ctx, args)
-	default:
+	t, ok := toolsByName[name]
+	if !ok {
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
+	return t.Handler(r, ctx, args)
 }
 
 // dayFrom resolves today/yesterday (es/en) or an explicit YYYY-MM-DD. An empty

@@ -590,3 +590,177 @@ func itoa(n int64) string {
 	b, _ := json.Marshal(n)
 	return string(b)
 }
+
+// --- registry table (M12) ---
+
+// fakeMemory is an available memory backend, enough to switch the memory tools on.
+type fakeMemory struct{ available bool }
+
+func (f *fakeMemory) Available() bool                           { return f.available }
+func (f *fakeMemory) Name() string                              { return "fake" }
+func (f *fakeMemory) Save(_ context.Context, _, _ string) error { return nil }
+func (f *fakeMemory) Recall(_ context.Context, _ string, _ int) (string, error) {
+	return "[]", nil
+}
+
+// baseToolNames are advertised by every registry, with no optional backend wired.
+var baseToolNames = []string{
+	"create_task", "list_tasks", "set_status", "set_state", "set_details", "drop_task",
+}
+
+var memToolNames = []string{"recall_memory", "remember_note"}
+
+var contextToolNames = []string{
+	"upsert_project", "add_project_note", "upsert_person", "add_person_note",
+}
+
+var dailyToolNames = []string{"list_day_tasks", "save_daily", "get_daily", "send_daily"}
+
+// allToolNames is the full advertised set of a fully wired registry, written out
+// on purpose: adding or removing a tool has to be acknowledged here.
+var allToolNames = []string{
+	"create_task",
+	"list_tasks",
+	"set_status",
+	"set_state",
+	"set_details",
+	"drop_task",
+	"recall_memory",
+	"remember_note",
+	"upsert_project",
+	"add_project_note",
+	"upsert_person",
+	"add_person_note",
+	"list_day_tasks",
+	"save_daily",
+	"get_daily",
+	"send_daily",
+}
+
+// advertised returns the tool names a registry currently exposes to the model.
+func advertised(r *Registry) []string {
+	defs := r.Definitions()
+	names := make([]string, 0, len(defs))
+	for _, d := range defs {
+		names = append(names, d.Name)
+	}
+	return names
+}
+
+// wantNames compares an advertised set against an expected one, order included:
+// the order is what the model sees, so a silent reshuffle should be visible too.
+func wantNames(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("advertised %d tools, want %d\n got: %v\nwant: %v", len(got), len(want), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("advertised tools differ at %d: got %q, want %q\n got: %v\nwant: %v",
+				i, got[i], want[i], got, want)
+		}
+	}
+}
+
+// newFullReg wires every optional backend, so all tools are advertised.
+func newFullReg(t *testing.T) *Registry {
+	t.Helper()
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	r := New(st)
+	r.SetMemory(&fakeMemory{available: true})
+	r.SetActivity(st)
+	r.SetContext(st)
+	r.SetDailies(st)
+	r.SetTelegram(&fakeTelegram{configured: true})
+	return r
+}
+
+// TestToolTableIsWellFormed guards the invariant behind the single table: every
+// entry is a real, dispatchable tool.
+func TestToolTableIsWellFormed(t *testing.T) {
+	seen := map[string]bool{}
+	for i, td := range toolTable {
+		if strings.TrimSpace(td.Def.Name) == "" {
+			t.Fatalf("toolTable[%d] has an empty name", i)
+		}
+		if td.Handler == nil {
+			t.Fatalf("tool %q has no handler", td.Def.Name)
+		}
+		if seen[td.Def.Name] {
+			t.Fatalf("tool %q is declared twice", td.Def.Name)
+		}
+		seen[td.Def.Name] = true
+	}
+	if len(toolsByName) != len(toolTable) {
+		t.Fatalf("dispatch index has %d entries for %d tools", len(toolsByName), len(toolTable))
+	}
+}
+
+// TestFullRegistryAdvertisesExactly pins the advertised set of a fully wired
+// registry, so an accidental addition or removal has to be acknowledged.
+func TestFullRegistryAdvertisesExactly(t *testing.T) {
+	wantNames(t, advertised(newFullReg(t)), allToolNames)
+}
+
+// TestGatingHidesUnwiredTools checks each optional backend independently: a
+// missing backend must hide exactly its own tools and nothing else.
+func TestGatingHidesUnwiredTools(t *testing.T) {
+	tests := []struct {
+		name string
+		wire func(*Registry, *store.SQLite)
+		want []string
+	}{
+		{"bare", func(*Registry, *store.SQLite) {}, baseToolNames},
+		{
+			"memory only",
+			func(r *Registry, _ *store.SQLite) { r.SetMemory(&fakeMemory{available: true}) },
+			append(append([]string{}, baseToolNames...), memToolNames...),
+		},
+		{
+			"memory present but unavailable",
+			func(r *Registry, _ *store.SQLite) { r.SetMemory(&fakeMemory{available: false}) },
+			baseToolNames,
+		},
+		{
+			"context only",
+			func(r *Registry, st *store.SQLite) { r.SetContext(st) },
+			append(append([]string{}, baseToolNames...), contextToolNames...),
+		},
+		{
+			"dailies only",
+			func(r *Registry, st *store.SQLite) { r.SetDailies(st) },
+			append(append([]string{}, baseToolNames...), dailyToolNames...),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			r := New(st)
+			tc.wire(r, st)
+			wantNames(t, advertised(r), tc.want)
+		})
+	}
+}
+
+// TestEveryAdvertisedToolDispatches closes the loop the other way: nothing the
+// model is told about can come back as an unknown tool.
+func TestEveryAdvertisedToolDispatches(t *testing.T) {
+	ctx := context.Background()
+	r := newFullReg(t)
+	for _, name := range advertised(r) {
+		// deliberately malformed arguments: the handler may reject them, but the
+		// failure must never be "unknown tool"
+		_, err := r.Dispatch(ctx, name, "{not json")
+		if err != nil && strings.Contains(err.Error(), "unknown tool") {
+			t.Fatalf("advertised tool %q does not dispatch: %v", name, err)
+		}
+	}
+}
