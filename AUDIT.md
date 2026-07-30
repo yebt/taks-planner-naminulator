@@ -4,15 +4,14 @@
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 17 / 42 closed — every CRITICAL, every HIGH, plus CI and the
-`tui.go` split.**
+**Progress: 19 / 42 closed — every CRITICAL, every HIGH, plus CI, the `tui.go`
+split and the SQLite/Plane robustness pair.**
 [C1](#c1) ✅ [C2](#c2) ✅ [C3](#c3) ✅ · [H1](#h1) ✅ [H2](#h2) ✅ [H3](#h3) ✅
 [H4](#h4) ✅ [H5](#h5) ✅ [H6](#h6) ✅ [H7](#h7) ✅ · [M1](#m1) ✅ [M5](#m5) ✅
 [M14](#m14) ✅ · [N1](#n1) ✅
 
 What remains is MEDIUM and below: [M12](#m12) table-driven tools, [M11](#m11)
-shared adapter factory, and robustness ([M7](#m7) SQLite pragmas, [M8](#m8)
-duplicate Plane issues, which [M7](#m7) makes more likely), then the
+shared adapter factory, [M9](#m9), [M10](#m10), [M15](#m15), [N2](#n2), and the
 [L1–L14](#low) cleanup.
 
 Suite green after every fix, `vet` and `gofmt` clean. **Every closed item ships
@@ -79,8 +78,8 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | [M4](#m4) | ⬜ | MEDIUM | `send_daily` advertised to the LLM without Telegram configured |
 | [M5](#m5) | ✅ | MEDIUM | `dayFrom` swallows bad dates; slash path rejects them |
 | [M6](#m6) | ⬜ | MEDIUM | `Dispatch` is exported with no nil-dependency guards |
-| [M7](#m7) | ⬜ | MEDIUM | SQLite opened without `busy_timeout` / WAL / conn limit |
-| [M8](#m8) | ⬜ | MEDIUM | `Syncer.Push` can create duplicate Plane issues |
+| [M7](#m7) | ✅ | MEDIUM | SQLite opened without `busy_timeout` / WAL / conn limit |
+| [M8](#m8) | ✅ | MEDIUM | `Syncer.Push` can create duplicate Plane issues |
 | [M9](#m9) | ⬜ | MEDIUM | `PullStates` aborts the batch and hides which task failed |
 | [M10](#m10) | ⬜ | MEDIUM | Agent max-steps exhaustion leaves dangling history |
 | [M11](#m11) | ⬜ | MEDIUM | `internal/tui` imports concrete adapters, duplicating wiring |
@@ -859,7 +858,7 @@ nil-dailies path by luck, not design.
 
 **Fix:** guard each handler the way the memory tools do.
 
-### M7 — SQLite opened without concurrency pragmas {#m7}
+### M7 — SQLite opened without concurrency pragmas {#m7} ✅ DONE
 
 **Where:** `internal/store/sqlite.go:25-36`
 
@@ -870,10 +869,29 @@ background `sendCmd` goroutine's tool calls write too. With the default rollback
 journal and zero busy timeout, the loser gets `SQLITE_BUSY` immediately — a raw
 "database is locked" error, no retry.
 
-**Fix:** `PRAGMA journal_mode=WAL`, `PRAGMA busy_timeout=5000`, and consider
-`SetMaxOpenConns(1)`.
+**Fix applied:** both pragmas ride on the connection string
+(`sqliteDSN`), so **every pooled connection** gets them — `busy_timeout` is
+per-connection, so setting it with a single `db.Exec` after opening would have
+applied to one connection and silently missed the rest.
 
-### M8 — `Syncer.Push` can create duplicate Plane issues {#m8}
+`url.URL` builds the DSN so a path with spaces or other odd characters cannot
+break out into the query string. The test opens a database at
+`"pragma test.db"` — space deliberate — for exactly that reason.
+
+**`SetMaxOpenConns(1)` was considered and rejected.** It would also remove the
+race, but it converts "a query issued while rows are still open" from an error
+into a **deadlock**. `ensureColumn` (`sqlite.go:137-158`) is safe today only
+because its loop drains the rows before the `ALTER`, which releases the
+connection — add a `break` there tomorrow and the process hangs. Trading an
+error for a hang is not a fix.
+
+**Test added:** `TestOpenSQLiteAppliesPragmas` queries `PRAGMA busy_timeout` and
+`PRAGMA journal_mode` **on a live connection**. Asserting the DSN string would
+prove nothing — an escaping mistake leaves both silently at their defaults,
+which is the whole failure mode. Verified failing-first: against the old code it
+reports `busy_timeout = 0`, i.e. a concurrent writer failing instantly.
+
+### M8 — `Syncer.Push` can create duplicate Plane issues {#m8} ✅ DONE
 
 **Where:** `internal/plane/syncer.go:125-151`
 
@@ -882,8 +900,36 @@ write** fails (e.g. the `SQLITE_BUSY` of M7), the id is never durably saved. The
 next `Push` reloads the task with an empty `WorkItemID` and takes the
 `CreateIssue` branch again → a **second** work item in Plane, with no dedup.
 
-**Fix:** on `store.Update` failure after a successful create, retry the local
-write before returning; or reconcile by searching Plane for the expected title.
+**Fix applied:** the write is now `persistLink`, which retries three times with
+a doubling delay and, if it still fails, returns an error naming the orphan:
+
+```
+plane work item wi-7 (#42) was created but could not be linked to task 3
+locally; re-syncing would create a duplicate: database is locked
+```
+
+**Being honest about which half does the work.** [M7](#m7) landed first, and its
+`busy_timeout` already absorbs the contention case, so the retry mostly covers
+failures that a retry will not help (a full disk, for instance). The real value
+here is the **error message**: it converts a silent duplicate — which surfaces
+days later as two identical tickets nobody can explain — into a loud, specific
+failure that names what to reconcile by hand.
+
+Reconciling automatically by searching Plane for the expected title was
+considered and skipped: it costs an extra API call on every create to defend
+against a window that [M7](#m7) has now mostly closed, and title matching is
+itself unreliable.
+
+**Tests added** (`internal/plane/syncer_test.go`), with a `flakyStore` that
+embeds a real store and fails the first N `Update` calls:
+- `TestSyncerPushRetriesTransientLinkFailure` — one transient failure, push
+  succeeds, the id is linked.
+- `TestSyncerPushNamesOrphanedWorkItem` — permanent failure; the error names the
+  work item, the sequence number **and** the word "duplicate", and exactly
+  `linkRetries` attempts were made.
+
+`TestSyncerPushPersistsIDBeforeRename`, which guards the adjacent ordering rule,
+passes unmodified.
 
 ### M9 — `PullStates` aborts the batch and hides which task failed {#m9}
 
@@ -1150,6 +1196,8 @@ Recorded so future audits don't re-litigate these:
 8. 🔧 **Structural:** ~~[M3](#m3) file split~~ done. **← NEXT:** [M12](#m12)
    table-driven tools, [M11](#m11) shared adapter factory. Pure refactors — land
    them behind the tests added in steps 1–6 and the CI gate from step 7.
-9. **Robustness leftovers:** [M7](#m7) SQLite pragmas, [M8](#m8) duplicate Plane
-   issues (which [M7](#m7) makes more likely), [M9](#m9), [M10](#m10),
-   [M15](#m15), then the [L1–L14](#low) cleanup and [N2](#n2).
+9. ✅ **Robustness pair:** ~~[M7](#m7)~~ SQLite pragmas and ~~[M8](#m8)~~
+   duplicate Plane issues — done together, since M7's missing busy timeout was
+   what made M8's window likely in the first place.
+10. **Leftovers:** [M9](#m9), [M10](#m10), [M15](#m15), [N2](#n2), and the
+   [L1–L14](#low) cleanup.
