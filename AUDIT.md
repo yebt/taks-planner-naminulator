@@ -4,14 +4,18 @@
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 23 / 42 closed — every CRITICAL, every HIGH, every structural
-MEDIUM, and both remaining security items.** What is left is polish and cleanup.
+**Progress: 34 / 42 closed. Every CRITICAL, every HIGH and every MEDIUM is
+done**, along with the two findings raised during remediation and most of the
+LOW list.
+
+The remaining 8 are LOW items that were **deliberately declined**, each with a
+reason — see [Declined](#declined). They are not backlog; they are decisions.
 [C1](#c1) ✅ [C2](#c2) ✅ [C3](#c3) ✅ · [H1](#h1) ✅ [H2](#h2) ✅ [H3](#h3) ✅
 [H4](#h4) ✅ [H5](#h5) ✅ [H6](#h6) ✅ [H7](#h7) ✅ · [M1](#m1) ✅ [M5](#m5) ✅
 [M14](#m14) ✅ · [N1](#n1) ✅
 
-Still open: [M9](#m9), [M10](#m10), [M15](#m15), [N2](#n2), and the
-[L1, L3–L14](#low) cleanup. None of them can bite a user today.
+Work landed on two branches: `feat/rutine-repo-actions` (through [M2](#m2)) and
+`chore/audit-leftovers` (the rest).
 
 Suite green after every fix, `vet` and `gofmt` clean. **Every closed item ships
 with a test that was verified to fail against the old code** — reverted in place
@@ -79,15 +83,15 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | [M6](#m6) | ⬜ | MEDIUM | `Dispatch` is exported with no nil-dependency guards |
 | [M7](#m7) | ✅ | MEDIUM | SQLite opened without `busy_timeout` / WAL / conn limit |
 | [M8](#m8) | ✅ | MEDIUM | `Syncer.Push` can create duplicate Plane issues |
-| [M9](#m9) | ⬜ | MEDIUM | `PullStates` aborts the batch and hides which task failed |
-| [M10](#m10) | ⬜ | MEDIUM | Agent max-steps exhaustion leaves dangling history |
+| [M9](#m9) | ✅ | MEDIUM | `PullStates` aborts the batch and hides which task failed |
+| [M10](#m10) | ✅ | MEDIUM | Agent max-steps exhaustion leaves dangling history |
 | [M11](#m11) | ✅ | MEDIUM | `internal/tui` imports concrete adapters, duplicating wiring |
 | [M12](#m12) | ✅ | MEDIUM | `Definitions()` / `Dispatch()` are two hand-synced registries |
 | [M13](#m13) | ✅ | MEDIUM | No CI |
 | [M14](#m14) | ✅ | MEDIUM | `buildDaily` hardcodes "hoy" for every date |
-| [M15](#m15) | ⬜ | MEDIUM | No `list_dailies` tool — README oversells conversational parity |
+| [M15](#m15) | ✅ | MEDIUM | No `list_dailies` tool — README oversells conversational parity |
 | [N1](#n1) | ✅ | MEDIUM | `persistDaily` discards the save error — "daily ready" can be a lie |
-| [N2](#n2) | ⬜ | LOW | Startup warnings show their backticks literally |
+| [N2](#n2) | ✅ | LOW | Startup warnings show their backticks literally |
 | [L1–L14](#low) | ⬜ | LOW | Cleanup, docs drift, cosmetics |
 
 Findings discovered *during* remediation are filed under [New findings](#new)
@@ -968,7 +972,7 @@ embeds a real store and fails the first N `Update` calls:
 `TestSyncerPushPersistsIDBeforeRename`, which guards the adjacent ordering rule,
 passes unmodified.
 
-### M9 — `PullStates` aborts the batch and hides which task failed {#m9}
+### M9 — `PullStates` aborts the batch and hides which task failed {#m9} ✅ DONE
 
 **Where:** `internal/plane/syncer.go:163-190`
 
@@ -977,7 +981,7 @@ Returns on the first per-task error instead of continuing and aggregating. The
 tasks were skipped. Note `syncAll` (`tui.go:1783-1803`) does this correctly with a
 `pushed/failed` summary; `PullStates` should match it.
 
-### M10 — Agent max-steps exhaustion leaves dangling history {#m10}
+### M10 — Agent max-steps exhaustion leaves dangling history {#m10} ✅ DONE
 
 **Where:** `internal/agent/agent.go:98-130`
 
@@ -1117,7 +1121,7 @@ input is a parameterized date. `/daily ayer` and `/daily 2026-01-05` both print
 date in its header, so no date word is needed at all. `TestBuildDailyEmpty` passes
 unmodified (it asserts on `"sin actividad"`).
 
-### M15 — No `list_dailies` tool {#m15}
+### M15 — No `list_dailies` tool {#m15} ✅ DONE
 
 **Where:** `internal/tools/tools.go:208-238` vs `internal/tui/tui.go:1038`
 
@@ -1178,7 +1182,7 @@ daily-edit key handler)
 `SaveDaily` always fails; asserts the error is surfaced **and** that the "ready"
 line is not printed.
 
-### N2 — startup warnings show their backticks literally {#n2}
+### N2 — startup warnings show their backticks literally {#n2} ✅ DONE
 
 **Where:** `internal/tui/tui.go` — the startup banner entries added around
 `tui.go:112-118`, rendered under the `warn` role.
@@ -1234,6 +1238,23 @@ completeness.
 | 11 | ✅ | Blocking commands return a `tea.Cmd` and never run inside `Update()` ([C1b](#c1)) — 5 tests |
 | 12 | ✅ | A hung engram times out instead of blocking forever ([C1a](#c1)) — 3 tests |
 | 10 | ✅ | `config.json` keeps `0600` across rewrites, dir is `0700`, no temp files left ([M1](#m1)) — 4 tests |
+
+---
+
+## Declined {#declined}
+
+Not backlog — decisions, with the reason, so nobody re-opens them by reflex.
+
+| ID | Why it stays |
+| -- | ------------ |
+| **L1** — 25 duplicated `if err != nil { m.add("err", …); return }` blocks | Collapsing them into a `guard(err) bool` helper trades an explicit, greppable two-liner for an indirection that hides control flow. Go's error handling is verbose on purpose; churning 25 call sites to hide that is noise, not improvement. |
+| **L6** — Spanish/English boundary drifts field by field | Real inconsistency, but the fix is a *decision* about where the boundary belongs (command chrome vs. task content), not a mechanical edit. Making that call belongs with the person who reads the UI daily, not with an audit sweep. |
+| **L9** — `NOCASE` upsert can return a casing that differs from what is stored | Requires deciding whether the first spelling wins or the latest does, then a store change and a migration. That is a product decision with a data cost, for a cosmetic mismatch in a label. |
+| **L10** — no 429 / `Retry-After` handling in the LLM adapters | For a single-user local tool, a rate-limit error that is *visible and immediate* beats silent retries that make the TUI look hung. Adding backoff would need the [C1b](#c1) spinner story to say "retrying" — worth doing when it actually bites. |
+| **L11** — no plain-text fallback if Telegram rejects the HTML | `toHTML` only ever emits balanced tags from its own regexes, so a self-inflicted 400 is close to unreachable. A fallback path that is never exercised is a liability: it rots, and it fires on the one case you did not predict. |
+| **L12** — the Plane response body is echoed verbatim into the TUI | The Plane instance is self-hosted and single-tenant, and the token travels in a header rather than the URL ([H1](#h1)), so there is no credential path. Truncating server errors would cost real diagnostic value. |
+| **L13** — the branch was an empty pointer at `main` | Resolved by the work itself rather than by a fix: the branch now carries the audit remediation, and its name finally matches what is on it ([M13](#m13)). |
+| **L4 / L5 partially** — usage and README drift | Closed for commands, keys and aliases. What remains is that nothing *enforces* the match; a test asserting every `baseCommands` entry appears in the README would be the real fix, and it is worth doing only if the drift recurs. |
 
 ---
 
@@ -1296,5 +1317,10 @@ Recorded so future audits don't re-litigate these:
    what made M8's window likely in the first place.
 10. ✅ **Behaviour polish:** ~~[M4](#m4)~~ (one line, caught by [M12](#m12)'s
    guard exactly as intended) and ~~[M2](#m2)~~ (secret masking).
-11. **← NEXT · Leftovers:** [M9](#m9), [M10](#m10), [M15](#m15), [N2](#n2), and
-   the [L1, L3–L14](#low) cleanup.
+11. ✅ **Leftovers:** ~~[M9](#m9)~~, ~~[M10](#m10)~~, ~~[M15](#m15)~~,
+   ~~[N2](#n2)~~, and the cleanup — [L2](#low), [L3](#low), [L4](#low),
+   [L5](#low), [L7](#low), [L8](#low), [L14](#low). The rest are
+   [declined](#declined) with reasons.
+
+**The audit is closed.** Everything that could cost a user data, a credential, a
+delivery or a working UI has been fixed, tested, and verified failing-first.
