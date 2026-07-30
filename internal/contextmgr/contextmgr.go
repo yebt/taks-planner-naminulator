@@ -21,6 +21,20 @@ func New(budget int) *Manager {
 
 // Fit returns the largest suffix of msgs that fits the budget, with the system
 // message (if any) always kept at the front. The full history is never mutated.
+//
+// Two rules pull against each other: the budget wants the smallest window,
+// while the API rejects a window that opens on an orphan tool result. When
+// dropping those orphans would leave nothing but the system message, the budget
+// loses — Fit walks back to the newest non-tool message and keeps the suffix
+// from there. That message is the assistant turn that issued the tool_use, so
+// an oversized tool result travels together with its call and stays valid.
+// The alternative (returning the system prompt alone) would silently reset the
+// conversation: no request, no tool output, and no error anywhere.
+//
+// Invariant: if msgs holds at least one non-system message, the result holds at
+// least one non-system message and never begins with llm.RoleTool. The only
+// exception is a malformed history whose non-system messages are all tool
+// results — no valid window exists there, so the system-only window is returned.
 func (m *Manager) Fit(msgs []llm.Message) []llm.Message {
 	if len(msgs) == 0 {
 		return msgs
@@ -51,11 +65,28 @@ func (m *Manager) Fit(msgs []llm.Message) []llm.Message {
 	for len(kept) > 0 && kept[0].Role == llm.RoleTool {
 		kept = kept[1:]
 	}
+	if len(kept) == 0 && len(rest) > 0 {
+		kept = suffixFromNewestNonTool(rest)
+	}
 
 	out := make([]llm.Message, 0, len(system)+len(kept))
 	out = append(out, system...)
 	out = append(out, kept...)
 	return out
+}
+
+// suffixFromNewestNonTool returns the shortest suffix of rest that still
+// carries a real message: everything from the newest non-tool message to the
+// end. Starting on that message keeps the tool results answering it, so the
+// suffix never opens on an orphan. It returns nil when rest is nothing but tool
+// results, since no valid window can be built from those alone.
+func suffixFromNewestNonTool(rest []llm.Message) []llm.Message {
+	for i := len(rest) - 1; i >= 0; i-- {
+		if rest[i].Role != llm.RoleTool {
+			return rest[i:]
+		}
+	}
+	return nil
 }
 
 func size(m llm.Message) int {
