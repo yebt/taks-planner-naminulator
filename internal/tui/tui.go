@@ -181,7 +181,8 @@ type chatModel struct {
 	suggestions    []suggestion
 	selected       int
 	thinking       bool
-	thinkStart     time.Time       // when the current LLM call began (for the elapsed timer)
+	thinkStart     time.Time       // when the current call began (for the elapsed timer)
+	busyLabel      string          // what is running, shown next to the spinner
 	spinner        int             // animation frame
 	quitArmed      bool            // first ctrl+c clears; second quits
 	confirm        *pendingConfirm // non-nil while awaiting y/n
@@ -225,6 +226,42 @@ type dailyMsg struct {
 	prior    string
 	err      error
 }
+
+// Command timeouts. Update() is the only thing draining the Bubbletea event
+// queue, so blocking work must run off it AND be bounded: an unbounded call on
+// a background goroutine leaks instead of freezing, which is better but still
+// wrong. These are deliberately generous — the job is to guarantee an end, not
+// to second-guess a slow network.
+const (
+	memoryOpTimeout   = 30 * time.Second
+	telegramOpTimeout = 30 * time.Second
+	planeOpTimeout    = 5 * time.Minute
+	storeOpTimeout    = 10 * time.Second
+)
+
+// asyncMsg carries the entries produced by a command that ran off the event
+// loop, to be appended when it lands.
+type asyncMsg struct{ entries []entry }
+
+// busy runs fn on its own goroutine under a bounded context and shows the
+// spinner labelled label while it runs. fn must not touch model state: it runs
+// concurrently with Update. Resolve anything you need from the model before
+// calling busy and capture it in the closure.
+func (m *chatModel) busy(label string, timeout time.Duration, fn func(context.Context) []entry) tea.Cmd {
+	m.thinking = true
+	m.thinkStart = time.Now()
+	m.busyLabel = label
+	run := func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		return asyncMsg{entries: fn(ctx)}
+	}
+	return tea.Batch(run, spinnerTick())
+}
+
+// errEntry and sysEntry keep the async closures terse.
+func errEntry(err error) []entry { return []entry{{role: "err", text: err.Error()}} }
+func sysEntry(s string) []entry  { return []entry{{role: "sys", text: s}} }
 
 func (m *chatModel) Init() tea.Cmd { return textarea.Blink }
 
@@ -276,9 +313,12 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.dailyDraft = text
 		m.dailyDraftDate = msg.dateKey
-		m.persistDaily(msg.dateKey, text)
-		m.add("raw", m.dailyDraft)
-		m.add("sys", "daily ("+msg.dateKey+") ready — /daily edit to tweak, /daily send to deliver.")
+		m.add("raw", text)
+		if err := m.persistDaily(msg.dateKey, text); err != nil {
+			m.add("err", "daily generated but NOT saved: "+err.Error())
+		} else {
+			m.add("sys", "daily ("+msg.dateKey+") ready — /daily edit to tweak, /daily send to deliver.")
+		}
 		m.layout()
 		return m, nil
 
@@ -300,6 +340,15 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clearToastMsg:
 		m.toast = ""
+		return m, nil
+
+	case asyncMsg:
+		m.thinking = false
+		m.busyLabel = ""
+		for _, e := range msg.entries {
+			m.add(e.role, e.text)
+		}
+		m.layout()
 		return m, nil
 
 	case tickMsg:
@@ -386,8 +435,11 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.dailyDraft = strings.TrimRight(m.ta.Value(), " \n\t")
 			m.dailyEditing = false
 			m.ta.Reset()
-			m.persistDaily(m.dailyDraftDate, m.dailyDraft)
-			m.add("sys", "daily updated. use /daily send to deliver it.")
+			if err := m.persistDaily(m.dailyDraftDate, m.dailyDraft); err != nil {
+				m.add("err", "edit kept in this session but NOT saved: "+err.Error())
+			} else {
+				m.add("sys", "daily updated. use /daily send to deliver it.")
+			}
 			m.layout()
 			return m, nil
 		case "esc":
@@ -1015,39 +1067,44 @@ func (m *chatModel) runCommand(val string) tea.Cmd {
 			m.add("err", "usage: /recall <query>")
 			break
 		}
-		out, err := m.deps.Memory.Recall(ctx, strings.Join(fields[1:], " "), 5)
-		if err != nil {
-			m.add("err", err.Error())
-		} else {
-			m.add("sys", out)
-		}
+		mem, query := m.deps.Memory, strings.Join(fields[1:], " ")
+		return m.busy("recalling", memoryOpTimeout, func(ctx context.Context) []entry {
+			out, err := mem.Recall(ctx, query, 5)
+			if err != nil {
+				return errEntry(err)
+			}
+			return sysEntry(out)
+		})
 
 	case "/remember":
 		if len(fields) < 2 {
 			m.add("err", "usage: /remember <note>")
 			break
 		}
-		note := strings.Join(fields[1:], " ")
-		if err := m.deps.Memory.Save(ctx, trunc(note, 48), note); err != nil {
-			m.add("err", err.Error())
-		} else {
-			m.add("sys", "remembered: "+trunc(note, 48))
-		}
+		mem, note := m.deps.Memory, strings.Join(fields[1:], " ")
+		return m.busy("remembering", memoryOpTimeout, func(ctx context.Context) []entry {
+			if err := mem.Save(ctx, trunc(note, 48), note); err != nil {
+				return errEntry(err)
+			}
+			return sysEntry("remembered: " + trunc(note, 48))
+		})
 
 	case "/sync":
-		m.syncAll(ctx)
+		return m.syncAll()
 
 	case "/pull":
 		if m.deps.Syncer == nil || !m.deps.Syncer.Configured() {
 			m.add("err", "Plane not configured (set base_url/token/slug/project in config)")
 			break
 		}
-		n, err := m.deps.Syncer.PullStates(ctx)
-		if err != nil {
-			m.add("err", err.Error())
-		} else {
-			m.add("sys", fmt.Sprintf("pulled states: %d task(s) updated", n))
-		}
+		syncer := m.deps.Syncer
+		return m.busy("pulling", planeOpTimeout, func(ctx context.Context) []entry {
+			n, err := syncer.PullStates(ctx)
+			if err != nil {
+				return errEntry(err)
+			}
+			return sysEntry(fmt.Sprintf("pulled states: %d task(s) updated", n))
+		})
 
 	case "/daily":
 		return m.handleDaily(ctx, fields)
@@ -1349,8 +1406,7 @@ func (m *chatModel) handleDaily(ctx context.Context, fields []string) tea.Cmd {
 		m.editDaily(ctx, dailyDayArg(fields[2:]))
 		return nil
 	case "send":
-		m.sendDaily(ctx, dailyDayArg(fields[2:]))
-		return nil
+		return m.sendDaily(ctx, dailyDayArg(fields[2:]))
 	default:
 		day, ok := parseDay(fields[1])
 		if !ok {
@@ -1475,10 +1531,16 @@ func (m *chatModel) draftFor(ctx context.Context, dateKey string) string {
 	return ""
 }
 
-func (m *chatModel) persistDaily(dateKey, content string) {
-	if m.deps.Dailies != nil && strings.TrimSpace(content) != "" {
-		_ = m.deps.Dailies.SaveDaily(context.Background(), dateKey, content)
+// persistDaily stores a digest, returning the failure rather than swallowing
+// it: the caller announces the daily is ready, and that claim must not outrun
+// the write.
+func (m *chatModel) persistDaily(dateKey, content string) error {
+	if m.deps.Dailies == nil || strings.TrimSpace(content) == "" {
+		return nil
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), storeOpTimeout)
+	defer cancel()
+	return m.deps.Dailies.SaveDaily(ctx, dateKey, content)
 }
 
 // showDaily prints a stored daily read-only, without regenerating it or
@@ -1512,22 +1574,27 @@ func (m *chatModel) editDaily(ctx context.Context, day time.Time) {
 
 // sendDaily delivers a date's draft to Telegram, degrading with a clear warning
 // when the integration is not configured.
-func (m *chatModel) sendDaily(ctx context.Context, day time.Time) {
+// sendDaily delivers a stored digest to Telegram. The draft is resolved here,
+// on the event loop, because it reads model state; only the network call is
+// handed off.
+func (m *chatModel) sendDaily(ctx context.Context, day time.Time) tea.Cmd {
 	dateKey := day.Format("2006-01-02")
 	content := m.draftFor(ctx, dateKey)
 	if strings.TrimSpace(content) == "" {
 		m.add("err", "no daily for "+dateKey+" — run /daily "+dateKey+" first")
-		return
+		return nil
 	}
 	if m.deps.Telegram == nil || !m.deps.Telegram.Configured() {
 		m.add("err", "can't send: Telegram not configured (set bot token + chat id in config)")
-		return
+		return nil
 	}
-	if err := m.deps.Telegram.Send(ctx, content); err != nil {
-		m.add("err", err.Error())
-		return
-	}
-	m.add("sys", "daily "+dateKey+" sent to Telegram ✓")
+	tg := m.deps.Telegram
+	return m.busy("sending", telegramOpTimeout, func(ctx context.Context) []entry {
+		if err := tg.Send(ctx, content); err != nil {
+			return errEntry(err)
+		}
+		return sysEntry("daily " + dateKey + " sent to Telegram ✓")
+	})
 }
 
 // listDailies shows the stored digests.
@@ -1803,27 +1870,32 @@ func writeNotes(b *strings.Builder, notes []domain.Note) {
 }
 
 // syncAll pushes every local task to Plane, reporting failures individually.
-func (m *chatModel) syncAll(ctx context.Context) {
+// syncAll pushes every local task to Plane off the event loop, reporting
+// per-task failures plus a summary when it lands.
+func (m *chatModel) syncAll() tea.Cmd {
 	if m.deps.Syncer == nil || !m.deps.Syncer.Configured() {
 		m.add("err", "Plane not configured (set base_url/token/slug/project in config)")
-		return
+		return nil
 	}
-	tasks, err := m.deps.Store.List(ctx, store.Filter{})
-	if err != nil {
-		m.add("err", err.Error())
-		return
-	}
-	pushed, failed := 0, 0
-	for _, t := range tasks {
-		tt := t
-		if err := m.deps.Syncer.Push(ctx, &tt); err != nil {
-			m.add("err", fmt.Sprintf("#%d %s: %v", t.ID, t.Label, err))
-			failed++
-		} else {
-			pushed++
+	syncer, st := m.deps.Syncer, m.deps.Store
+	return m.busy("syncing", planeOpTimeout, func(ctx context.Context) []entry {
+		tasks, err := st.List(ctx, store.Filter{})
+		if err != nil {
+			return errEntry(err)
 		}
-	}
-	m.add("sys", fmt.Sprintf("sync → Plane: %d pushed, %d failed", pushed, failed))
+		var out []entry
+		pushed, failed := 0, 0
+		for _, t := range tasks {
+			tt := t
+			if err := syncer.Push(ctx, &tt); err != nil {
+				out = append(out, entry{role: "err", text: fmt.Sprintf("#%d %s: %v", t.ID, t.Label, err)})
+				failed++
+			} else {
+				pushed++
+			}
+		}
+		return append(out, entry{role: "sys", text: fmt.Sprintf("sync → Plane: %d pushed, %d failed", pushed, failed)})
+	})
 }
 
 // showTask renders one task expanded following the activity template.
@@ -2478,7 +2550,11 @@ func (m *chatModel) footer() string {
 	}
 	if m.thinking {
 		frame := spinnerFrames[m.spinner%len(spinnerFrames)]
-		return thinkStyle.Render(fmt.Sprintf("%s thinking… %ds", frame, int(time.Since(m.thinkStart).Seconds())))
+		label := m.busyLabel
+		if label == "" {
+			label = "thinking"
+		}
+		return thinkStyle.Render(fmt.Sprintf("%s %s… %ds", frame, label, int(time.Since(m.thinkStart).Seconds())))
 	}
 	return helpStyle.Render("enter send · alt+enter newline · pgup/pgdn/wheel scroll · drag select · right-click copy · esc cancel · ctrl+l clear · ctrl+c quit")
 }
