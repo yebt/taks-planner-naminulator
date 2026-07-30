@@ -16,7 +16,7 @@ import (
 type Syncer struct {
 	client        *Client
 	store         store.TaskStore
-	stateDefaults map[string]string // group -> default state name (reserved for state mapping)
+	stateDefaults map[string]string // Plane state group -> chosen state id, used by resolveStateID
 	estimate      string            // default estimate_point for new work items ("" = unset)
 	states        []State
 	labels        []Label

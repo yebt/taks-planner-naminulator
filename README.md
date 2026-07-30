@@ -22,12 +22,12 @@ go run ./cmd/planner                # start the chat harness (default)
 
 Subcommands:
 
-| Command          | What it does                                             |
-| ---------------- | -------------------------------------------------------- |
-| `planner`        | Start the interactive chat harness (default)             |
-| `planner tui`    | Alias for the chat harness                               |
-| `planner config` | Open the configuration TUI (providers, Plane, Telegram)  |
-| `planner help`   | Show usage                                               |
+| Command                    | What it does                                            |
+| -------------------------- | ------------------------------------------------------- |
+| `planner`                  | Start the interactive chat harness (default)            |
+| `planner chat` / `tui`     | Aliases for the chat harness                            |
+| `planner config`           | Open the configuration TUI (providers, Plane, Telegram) |
+| `planner help` / `-h`      | Show usage                                              |
 
 Files (under `~/.config/planner/`, override the config path with
 `PLANNER_CONFIG`):
@@ -91,6 +91,8 @@ activity-template details (objective, acceptance criteria, etc.).
 | `alt+enter`             | newline (multi-line input)                        |
 | `↑` / `↓`               | recall input history (single-line)                |
 | `pgup` / `pgdn` / wheel | scroll the conversation                           |
+| `ctrl+u` / `ctrl+d`     | scroll half a page                                |
+| `ctrl+p` / `ctrl+n`     | move through the suggestion menu                  |
 | click + drag            | select text (character-granular)                  |
 | right-click             | copy the current selection to the clipboard       |
 | `esc`                   | cancel a selection / close the suggestion menu    |
@@ -195,7 +197,10 @@ mentioned project record the link (shown in `/task`).
 
 - `/clear` — clear the on-screen conversation and agent history
 - `/help` — list commands
-- `/quit` — exit
+- `/quit` — exit (also `/exit`, `/q`)
+
+`/todos` is an alias for `/todo`. When `/state <id>` opens its picker, `↑`/`↓`
+move, `enter` selects and `esc` cancels.
 
 ---
 

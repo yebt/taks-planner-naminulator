@@ -63,10 +63,14 @@ func (m *chatModel) setContent() {
 			blocks = append(blocks, toolStyle.Render(e.text))
 		case "err":
 			blocks = append(blocks, body.Inherit(errStyle).Render("error: "+e.text))
+		// The health-check messages point at commands and UI paths in backticks, so
+		// they carry markup too. These two roles only ever hold fixed startup
+		// strings, which is why rendering them is safe — do not widen this to roles
+		// that carry model or user text without deciding that deliberately.
 		case "alert":
-			blocks = append(blocks, body.Inherit(errStyle).Render("⚠ "+e.text))
+			blocks = append(blocks, body.Inherit(errStyle).Render("⚠ "+renderMarkup(e.text)))
 		case "warn":
-			blocks = append(blocks, body.Inherit(warnStyle).Render("⚠ "+e.text))
+			blocks = append(blocks, body.Inherit(warnStyle).Render("⚠ "+renderMarkup(e.text)))
 		case "daily":
 			// Model-authored markup: paint it and wrap it. Unlike "raw" below,
 			// nothing has pre-formatted this text to the viewport width.
@@ -105,10 +109,20 @@ func (m *chatModel) layout() {
 		return
 	}
 	m.ta.SetWidth(m.width - 1)
-	const inputH = 3 // fixed input height (dynamic growth was reverted earlier)
+	// Rows View() spends outside the viewport. Named so that adding or removing a
+	// row in View() has an obvious place to be accounted for, instead of a lone
+	// literal nobody connects to the layout.
+	const (
+		inputH   = 3 // fixed input height (dynamic growth was reverted earlier)
+		headerH  = 1
+		dividerH = 1
+		helpH    = 1
+		statusH  = 1
+		marginH  = 1
+		chromeH  = headerH + dividerH + helpH + statusH + marginH
+	)
 	m.ta.SetHeight(inputH)
-	// leaves room for: header + divider + input + help + status + margin
-	vpH := m.height - len(m.suggestions) - inputH - 5
+	vpH := m.height - len(m.suggestions) - inputH - chromeH
 	if vpH < 3 {
 		vpH = 3
 	}

@@ -84,11 +84,19 @@ func usage() {
 
 usage:
   planner          start the interactive chat harness (default)
+  planner chat     alias for the chat harness
   planner tui      alias for the chat harness
-  planner config   open the configuration TUI (providers, keys, plane, context)
-  planner help     show this help
+  planner config   open the configuration TUI (providers, keys, plane, telegram)
+  planner help     show this help  (also -h, --help)
 
-in the harness: type / for the command menu — /todo /task /new /status /model /key /save /recall /daily /clear
+in the harness, type / for the command menu:
+  tasks    /todo /task /new /status /state /drop
+  plane    /sync /pull
+  dailies  /daily /dailies
+  llm      /model /fav /key
+  context  /projects /project /people /person
+  session  /save /chats /load /resume /newchat /recall /remember /clear /help /quit
+
 API keys: edit them in 'planner config', or set them live in the harness with /key.
 `)
 }
