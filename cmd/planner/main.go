@@ -13,11 +13,10 @@ import (
 	"github.com/webcloster-dev/planner/internal/daily"
 	"github.com/webcloster-dev/planner/internal/llm"
 	"github.com/webcloster-dev/planner/internal/memory"
-	"github.com/webcloster-dev/planner/internal/plane"
 	"github.com/webcloster-dev/planner/internal/store"
-	"github.com/webcloster-dev/planner/internal/telegram"
 	"github.com/webcloster-dev/planner/internal/tools"
 	"github.com/webcloster-dev/planner/internal/tui"
+	"github.com/webcloster-dev/planner/internal/wiring"
 )
 
 // systemPrompt is a var rather than a const because it embeds daily.FormatSpec:
@@ -146,19 +145,13 @@ func runChat() error {
 	reg.SetActivity(st)
 	reg.SetContext(st)
 
-	syncer := plane.NewSyncer(plane.New(plane.Config{
-		BaseURL:       cfg.Plane.BaseURL,
-		Token:         cfg.Plane.APIToken,
-		WorkspaceSlug: cfg.Plane.WorkspaceSlug,
-		ProjectID:     cfg.Plane.ProjectID,
-	}), st, cfg.Plane.StateDefaults)
-	syncer.SetEstimate(cfg.Plane.DefaultEstimate)
+	syncer := wiring.PlaneSyncer(cfg, st)
 	reg.SetSyncer(syncer)
 
 	ag := agent.New(provider, reg, systemPrompt)
 	ag.SetWindow(contextmgr.New(cfg.ContextBudget))
 
-	tg := telegram.New(cfg.Telegram.BotToken, cfg.Telegram.ChatID, cfg.Telegram.ThreadID)
+	tg := wiring.TelegramClient(cfg)
 	reg.SetDailies(st)
 	reg.SetTelegram(tg)
 
