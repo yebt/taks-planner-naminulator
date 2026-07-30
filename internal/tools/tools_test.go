@@ -327,6 +327,110 @@ func TestDailyTools(t *testing.T) {
 	}
 }
 
+func TestListDailiesReturnsStoredDates(t *testing.T) {
+	ctx := context.Background()
+	r, _ := newDailyReg(t)
+
+	long := "Daily: 2026-07-06\n\nTrabajo:\n  + " + strings.Repeat("mucho texto ", 60)
+	for _, d := range []struct{ date, content string }{
+		{"2026-07-06", long},
+		{"2026-07-07", "Daily: 2026-07-07\n\nTrabajo:\n  + revisión de PRs"},
+	} {
+		if _, err := r.Dispatch(ctx, "save_daily", `{"date":"`+d.date+`","content":`+quote(d.content)+`}`); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, err := r.Dispatch(ctx, "list_dailies", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []dailyView
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("list_dailies is not a JSON array of dailies: %s (%v)", out, err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected the 2 stored dailies, got %d: %s", len(got), out)
+	}
+	// most recent first, mirroring what /dailies shows
+	if got[0].Date != "2026-07-07" || got[1].Date != "2026-07-06" {
+		t.Fatalf("dates missing or out of order: %s", out)
+	}
+	if !strings.Contains(got[1].Preview, "Daily: 2026-07-06") {
+		t.Fatalf("preview should open with the digest: %q", got[1].Preview)
+	}
+	// the listing is a summary: a long body must not come back whole
+	if len(([]rune)(got[1].Preview)) > dailyPreviewChars+1 {
+		t.Fatalf("preview not clipped: %d runes", len([]rune(got[1].Preview)))
+	}
+	if strings.Contains(out, "\\n") {
+		t.Fatalf("preview should be flattened to one line: %s", out)
+	}
+}
+
+func TestListDailiesHonoursLimit(t *testing.T) {
+	ctx := context.Background()
+	r, _ := newDailyReg(t)
+	for _, date := range []string{"2026-07-05", "2026-07-06", "2026-07-07"} {
+		if _, err := r.Dispatch(ctx, "save_daily", `{"date":"`+date+`","content":"x"}`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := r.Dispatch(ctx, "list_dailies", `{"limit":2}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []dailyView
+	_ = json.Unmarshal([]byte(out), &got)
+	if len(got) != 2 || got[0].Date != "2026-07-07" {
+		t.Fatalf("limit ignored or wrong window: %s", out)
+	}
+}
+
+func TestListDailiesRejectsBadArgs(t *testing.T) {
+	ctx := context.Background()
+	r, _ := newDailyReg(t)
+	if _, err := r.Dispatch(ctx, "save_daily", `{"date":"2026-07-07","content":"x"}`); err != nil {
+		t.Fatal(err)
+	}
+	// truncated payload: listing everything anyway would hide the model's error
+	if _, err := r.Dispatch(ctx, "list_dailies", "{not json"); err == nil {
+		t.Fatal("list_dailies: malformed arguments should error")
+	}
+	if _, err := r.Dispatch(ctx, "list_dailies", `{"limit":-1}`); err == nil {
+		t.Fatal("list_dailies: a negative limit should error")
+	}
+	// absent arguments stay the legitimate "list them all" default
+	for _, args := range []string{"", "{}"} {
+		if _, err := r.Dispatch(ctx, "list_dailies", args); err != nil {
+			t.Fatalf("list_dailies with args %q should work: %v", args, err)
+		}
+	}
+}
+
+func TestListDailiesIsGatedOnTheDailyStore(t *testing.T) {
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, name := range advertised(New(st)) {
+		if name == "list_dailies" {
+			t.Fatal("list_dailies advertised without a daily store")
+		}
+	}
+}
+
+// quote renders a Go string as a JSON string literal, so a multi-line daily can
+// be embedded in a handwritten arguments payload.
+func quote(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
 // newDailyReg builds a registry with activity, dailies and a configured
 // Telegram sender, so the day-scoped tools are all reachable.
 func newDailyReg(t *testing.T) (*Registry, *fakeTelegram) {
@@ -616,7 +720,7 @@ var contextToolNames = []string{
 
 // send_daily is listed apart: it needs a configured Telegram sender on top of a
 // daily store, so the two sets are gated differently.
-var dailyToolNames = []string{"list_day_tasks", "save_daily", "get_daily"}
+var dailyToolNames = []string{"list_day_tasks", "save_daily", "get_daily", "list_dailies"}
 var telegramToolNames = []string{"send_daily"}
 
 // allToolNames is the full advertised set of a fully wired registry, written out
@@ -637,6 +741,7 @@ var allToolNames = []string{
 	"list_day_tasks",
 	"save_daily",
 	"get_daily",
+	"list_dailies",
 	"send_daily",
 }
 

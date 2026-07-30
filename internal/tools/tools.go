@@ -292,6 +292,17 @@ var toolTable = []toolDef{
 	},
 	{
 		Def: llm.Tool{
+			Name:        "list_dailies",
+			Description: "List the stored daily digests, most recent first, with a short preview of each. Use get_daily to read one in full.",
+			Parameters: obj(props{
+				"limit": intProp("Max dailies to return, most recent first (default 30)"),
+			}),
+		},
+		Enabled: (*Registry).dailiesEnabled,
+		Handler: (*Registry).listDailies,
+	},
+	{
+		Def: llm.Tool{
 			Name:        "send_daily",
 			Description: "Send the stored daily for a date to Telegram. Only when the user asks.",
 			Parameters:  obj(props{"date": strProp("today | yesterday | YYYY-MM-DD")}, "date"),
@@ -422,6 +433,48 @@ func (r *Registry) getDaily(ctx context.Context, args string) (string, error) {
 		return "", err
 	}
 	return marshal(map[string]any{"date": key, "content": d.Content})
+}
+
+// defaultDailyListLimit caps how many digests list_dailies returns when the
+// model doesn't ask for a number: enough to cover more than a working month,
+// small enough that a year of stored dailies can't flood the context window.
+const defaultDailyListLimit = 30
+
+// dailyPreviewChars is how much of a digest the listing shows. A daily is a
+// multi-paragraph narrative; the list is for picking one, not for reading it.
+const dailyPreviewChars = 120
+
+func (r *Registry) listDailies(ctx context.Context, args string) (string, error) {
+	var in struct {
+		Limit int `json:"limit"`
+	}
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("list_dailies: bad args: %w", err)
+	}
+	if in.Limit < 0 {
+		return "", fmt.Errorf("list_dailies: limit must be >= 0, got %d", in.Limit)
+	}
+	ds, err := r.dailies.ListDailies(ctx)
+	if err != nil {
+		return "", err
+	}
+	limit := in.Limit
+	if limit == 0 {
+		limit = defaultDailyListLimit
+	}
+	// ListDailies is ordered most recent first, so the head is the newest window.
+	if len(ds) > limit {
+		ds = ds[:limit]
+	}
+	views := make([]dailyView, 0, len(ds))
+	for _, d := range ds {
+		v := dailyView{Date: d.Date, Preview: preview(d.Content, dailyPreviewChars)}
+		if !d.UpdatedAt.IsZero() {
+			v.UpdatedAt = d.UpdatedAt.Local().Format(time.RFC3339)
+		}
+		views = append(views, v)
+	}
+	return marshal(views)
 }
 
 func (r *Registry) sendDaily(ctx context.Context, args string) (string, error) {
@@ -770,6 +823,27 @@ type taskView struct {
 	// SyncError carries why the Plane push failed. Empty (and omitted) when the
 	// push succeeded or Plane isn't configured, so the happy path is unchanged.
 	SyncError string `json:"sync_error,omitempty"`
+}
+
+// dailyView is a stored daily as it appears in a listing: its identity plus a
+// short preview. The full body is deliberately left out — digests are long and
+// the model reads one back with get_daily once it knows which date it wants.
+type dailyView struct {
+	Date      string `json:"date"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	Preview   string `json:"preview,omitempty"`
+}
+
+// preview flattens a digest to one line and clips it to max runes, so a list of
+// dailies stays a list and not their full text. Runes, not bytes: cutting a
+// multi-byte character in half would emit invalid UTF-8.
+func preview(s string, max int) string {
+	flat := strings.Join(strings.Fields(s), " ")
+	rs := []rune(flat)
+	if len(rs) <= max {
+		return flat
+	}
+	return strings.TrimRight(string(rs[:max]), " ") + "…"
 }
 
 func view(t domain.Task) taskView {

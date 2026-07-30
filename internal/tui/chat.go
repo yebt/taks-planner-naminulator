@@ -61,6 +61,7 @@ func (m *chatModel) renderToolEvents() {
 			ID     int64  `json:"id"`
 			Label  string `json:"label"`
 			Status string `json:"status"`
+			Date   string `json:"date"`
 		}
 		_ = json.Unmarshal([]byte(ev.Result), &v)
 		tag := v.Label
@@ -91,6 +92,23 @@ func (m *chatModel) renderToolEvents() {
 			m.add("tool", "~ note "+tag)
 		case "save_daily":
 			m.add("tool", "~ daily "+tag)
+		case "get_daily":
+			// get_daily answers with the date and the body, never a label, so the
+			// date is what identifies the read here.
+			if v.Date != "" {
+				tag = v.Date
+			}
+			m.add("tool", "? daily "+tag)
+		case "list_dailies", "list_day_tasks":
+			// The list tools answer with a JSON array, so no label was ever parsed
+			// above; the row count is the useful thing to show instead of the name.
+			var rows []json.RawMessage
+			_ = json.Unmarshal([]byte(ev.Result), &rows)
+			what := "dailies"
+			if ev.Name == "list_day_tasks" {
+				what = "day tasks"
+			}
+			m.add("tool", fmt.Sprintf("? %s · %d", what, len(rows)))
 		case "send_daily":
 			m.add("tool", "✈ daily "+tag+" sent")
 		default:
