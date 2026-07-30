@@ -224,6 +224,10 @@ go test ./...
 Adapters (LLM, Plane, Telegram) are tested against `httptest` servers — no live
 API calls; the store, tools, and TUI helpers run against a temp SQLite file.
 
+CI (`.github/workflows/ci.yml`) runs on every push and pull request: `gofmt`,
+`go build`, a second build with `CGO_ENABLED=0` (the pure-Go binary this project
+promises), `go vet`, the suite, and the suite again under `-race`.
+
 ---
 
 ## Notes
