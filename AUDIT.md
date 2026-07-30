@@ -4,13 +4,14 @@
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 12 / 42 closed — all three CRITICALs and 5 of 7 HIGHs are done.**
-[C1](#c1) ✅ · [C2](#c2) ✅ · [C3](#c3) ✅ · [H1](#h1) ✅ · [H2](#h2) ✅ ·
-[H4](#h4) ✅ · [H5](#h5) ✅ · [H6](#h6) ✅ · [M1](#m1) ✅ · [M5](#m5) ✅ ·
+**Progress: 14 / 42 closed — every CRITICAL and every HIGH is done.**
+[C1](#c1) ✅ [C2](#c2) ✅ [C3](#c3) ✅ · [H1](#h1) ✅ [H2](#h2) ✅ [H3](#h3) ✅
+[H4](#h4) ✅ [H5](#h5) ✅ [H6](#h6) ✅ [H7](#h7) ✅ · [M1](#m1) ✅ [M5](#m5) ✅
 [M14](#m14) ✅ · [N1](#n1) ✅
 
-Still open at HIGH: [H3](#h3) (Telegram 4096-char limit) and [H7](#h7)
-(`pushSync` swallows Plane errors).
+What remains is MEDIUM and below: mostly structure ([M3](#m3) the `tui.go`
+split, [M12](#m12) table-driven tools), robustness ([M7](#m7) SQLite pragmas,
+[M8](#m8) duplicate Plane issues), and [M13](#m13) CI.
 
 Suite green after every fix, `vet` and `gofmt` clean. **Every closed item ships
 with a test that was verified to fail against the old code** — reverted in place
@@ -65,11 +66,11 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | [C3](#c3) | ✅ | CRITICAL | Daily fallback silently overwrites a hand-edited draft |
 | [H1](#h1) | ✅ | HIGH | Telegram bot token leaks on screen through `*url.Error` |
 | [H2](#h2) | ✅ | HIGH | Local-vs-UTC day boundary mismatch |
-| [H3](#h3) | ⬜ | HIGH | No Telegram 4096-char handling — long dailies never deliver |
+| [H3](#h3) | ✅ | HIGH | No Telegram 4096-char handling — long dailies never deliver |
 | [H4](#h4) | ✅ | HIGH | TUI never renders the markup it asks the LLM to produce |
 | [H5](#h5) | ✅ | HIGH | Daily format spec forked three ways, already drifted |
 | [H6](#h6) | ✅ | HIGH | Malformed tool-call JSON silently swallowed in 4 handlers |
-| [H7](#h7) | ⬜ | HIGH | `pushSync` discards Plane errors with zero signal |
+| [H7](#h7) | ✅ | HIGH | `pushSync` discards Plane errors with zero signal |
 | [M1](#m1) | ✅ | MEDIUM | `config.json` is world-readable and written non-atomically |
 | [M2](#m2) | ⬜ | MEDIUM | `/key` echoes the secret and keeps it in input history |
 | [M3](#m3) | ⬜ | MEDIUM | `tui.go` is a 2503-line god-object |
@@ -402,7 +403,7 @@ the finding).
 
 ---
 
-### H3 — No Telegram 4096-char handling {#h3}
+### H3 — No Telegram 4096-char handling {#h3} ✅ DONE
 
 **Where:** `internal/telegram/client.go:42-84`, `internal/tui/tui.go:1494-1510`
 
@@ -413,9 +414,52 @@ replies `ok:false` with "message is too long"; the user gets an opaque error and
 the daily simply never arrives. No chunking, no truncation, no pointer to the
 full text. They must manually shorten and retry.
 
-**Fix:** split on paragraph boundaries into ≤4096-char chunks and send
-sequentially, or truncate with an explicit `…(truncated)` marker. Test with a
-5000-char daily.
+**Fix applied:** chunking, not truncation — nothing is dropped.
+`internal/telegram/split.go`: `splitForTelegram(text, limit) []string`, plus
+`fitsHTML`, `splitUnits`, `packUnits`, `hardSplit`, `longestFit`.
+
+Three decisions worth keeping in mind:
+
+1. **Split the source, never the HTML.** Cutting the HTML output could straddle
+   an open `<b>`/`<i>`/`<code>` tag and earn a 400. Dailies never span a markup
+   construct across lines, so line-boundary splitting on the CommonMark source is
+   safe. `toHTML` is applied per chunk inside `sendOne`.
+2. **Size by rendered length** — every fit check is `len(toHTML(chunk)) <= 4096`.
+   Conservative, since tags inflate the count and Telegram's limit is on the
+   parsed text. Conservative is right: the cost of being wrong is a message that
+   never arrives.
+3. **Blank lines first, then newlines, then a hard cut.** Sections stay together
+   when they can. `chunkUnit.sep` remembers which separator rejoins a unit, and
+   the separator is dropped when a unit opens a chunk, so no chunk starts with a
+   stray blank line.
+
+**Termination is guaranteed, not merely likely.** `hardSplit` forces `n = 1` when
+`longestFit` returns 0. The pathological case is real, not theoretical: at limit
+1, `&` renders to `&amp;` — five characters — so nothing ever fits and a naive
+loop spins forever. There is a test pinned to exactly that input.
+
+**Partial failure is legible:** `sending chunk 2 of 4: telegram: message is too
+long`, wrapping so the API description survives, and the send stops there.
+Reporting a generic failure after half the daily was delivered would be worse
+than not sending at all.
+
+**Common case untouched:** `splitForTelegram` returns the input byte-for-byte
+when it fits and `Send` short-circuits on `len(chunks) == 1`, so a normal daily
+produces the identical single request it always did. `Send`'s signature is
+unchanged — no caller needed editing.
+
+**Judgement call flagged by the implementer:** empty chunks are filtered, so a run
+of 3+ newlines collapses at a boundary (Telegram rejects an empty message).
+Content lines are never affected.
+
+**Tests added** (`internal/telegram/client_test.go`): `TestSendSplitsLongDaily`
+(200-line digest — every chunk within the limit, every source line delivered once
+and in order, `parse_mode`/thread/chat id on all of them),
+`TestSendShortMessageIsOneRequest` (the no-regression guard),
+`TestSendChunkFailureNamesChunk`, `TestSendSplitsUnbrokenLine` (a 20480-char
+unbroken line), and `TestSplitForTelegram` (6 subtests on the helper directly).
+
+No existing test needed touching. Verified failing-first, and under `-race`.
 
 ---
 
@@ -583,7 +627,7 @@ assumed** — it is the obvious way an over-eager fix breaks the tools.
 
 ---
 
-### H7 — `pushSync` discards Plane errors with zero signal {#h7}
+### H7 — `pushSync` discards Plane errors with zero signal {#h7} ✅ DONE
 
 **Where:** `internal/tools/tools.go:77-83`
 
@@ -603,9 +647,41 @@ line, no counter, no status marker.
 agent or `/new` reports success and lands locally; none reach Plane. The user
 finds out days later when a ticket is missing.
 
-**Fix:** record the push outcome on the task (a `sync_error` column or a
-`last_sync_at`) and surface a discreet indicator in `/todo` / `/task`, plus a
-startup or per-N-failures warning. Keep the operation non-fatal.
+**Fix applied — the smallest change that removes the silence.** `pushSync`
+returns its error, and the four mutating handlers (`createTask`, `setStatus`,
+`setState`, `setDetails`) attach it to the tool result via a new
+`syncedView(t, syncErr)` helper. `taskView` gained
+`SyncError string \`json:"sync_error,omitempty"\`` — snake_case, matching the
+existing `work_item` / `start_date` convention.
+
+**The distinction that is the whole point of this finding:** the handlers still
+return `(string, nil)` when a push fails. The local write succeeded, so it is not
+a tool error — the failure is *data in the result*. Returning a Go error would
+turn a local success into a tool failure and break the local-first contract that
+[H7](#h7) exists to defend. Visible, not fatal.
+
+The agent reading that result is what tells the user, which is exactly the
+channel that was missing.
+
+`view(t)` itself is untouched, so `list_tasks`, `list_day_tasks` and `drop_task`
+are byte-identical. On success, or with Plane unconfigured, the key is **absent**
+rather than empty.
+
+**No store column, no domain change, no other package touched** — deliberately
+smaller than the original suggestion, which is still available if per-task sync
+state in `/todo` / `/task` turns out to be wanted.
+
+**Tests added** (`internal/tools/tools_test.go`, with a new `fakeSyncer`):
+`TestPushFailureReportedButLocalWriteSucceeds` (asserts no Go error, the task is
+really in the store, and `sync_error` carries the reason — for `create_task` and
+`set_status`, so the fix is not create-only), `TestPushSuccessOmitsSyncError`,
+`TestPlaneUnconfiguredNeverPushesNorReportsSyncError`.
+
+The no-regression guards decode into `map[string]json.RawMessage` and assert the
+key is **absent**, not merely empty — an `omitempty` bug would slip past a
+zero-value check.
+
+No existing test was modified. Verified failing-first, and under `-race`.
 
 ---
 
@@ -934,7 +1010,7 @@ completeness.
 | 3 | ✅ | The Telegram bot token never appears in any error returned by `Send` ([H1](#h1)) |
 | 4 | ✅ | `"hoy"` and the equivalent `YYYY-MM-DD` resolve to the same local window ([H2](#h2)) — 2 tests, replacing the formatting-only assertion |
 | 5 | ✅ | `Dispatch` with malformed JSON errors for `send_daily`, `get_daily`, `list_day_tasks`, `list_tasks` — and empty args still work ([H6](#h6)) |
-| 6 | ⬜ | A >4096-char daily is chunked or truncated, not dropped ([H3](#h3)) |
+| 6 | ✅ | A >4096-char daily is chunked, not dropped ([H3](#h3)) — 5 tests |
 | 7 | ⬜ | Agent max-steps exhaustion: error returned, and `History()` left in a defined state ([M10](#m10)) |
 | 8 | ⬜ | `PullStates` behavior when task A fails and task B follows ([M9](#m9)) |
 | 9 | ✅ | `persistDaily` failure is reported instead of announcing "ready" ([N1](#n1)) |
@@ -990,8 +1066,9 @@ Recorded so future audits don't re-litigate these:
 4. ✅ **Collapse the daily spec:** ~~[H5](#h5)~~ → `internal/daily`. Done before
    H4, as planned, so the renderer consumes the same constants.
 5. ✅ **Then [H4](#h4)** ~~(render + wrap)~~ — also fixed the selection desync.
-6. **← NEXT · Remaining HIGHs:** [H3](#h3) (chunk or truncate long dailies) and
-   [H7](#h7) (make failed Plane pushes visible). Both are small and independent.
+6. ✅ **Remaining HIGHs:** ~~[H3](#h3)~~ (long dailies chunked) and ~~[H7](#h7)~~
+   (failed Plane pushes now visible) — done.
+   **← NEXT** is step 7.
 7. **Structural:** [M3](#m3) file split, [M12](#m12) table-driven tools,
    [M11](#m11) shared adapter factory. Pure refactors — land them behind the
    tests added in steps 1–2, never before.
