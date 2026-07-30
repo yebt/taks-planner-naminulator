@@ -4,9 +4,14 @@
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 2 / 41 closed** — [C3](#c3) ✅ · [H1](#h1) ✅ · 1 new finding filed
-([N1](#n1)). Suite green after every fix; each closed item ships with a test that
-was verified to fail against the old behavior.
+**Progress: 7 / 41 closed** — [C2](#c2) ✅ · [C3](#c3) ✅ · [H1](#h1) ✅ ·
+[H2](#h2) ✅ · [H6](#h6) ✅ · [M1](#m1) ✅ · [M5](#m5) ✅ · [M14](#m14) ✅ ·
+1 new finding filed ([N1](#n1)).
+
+Suite green after every fix, `vet` and `gofmt` clean. **Every closed item ships
+with a test that was verified to fail against the old code** — reverted in place
+and re-run, not assumed. Date-sensitive fixes were additionally checked under
+`TZ=America/Bogota` so a UTC-only CI cannot hide them.
 
 ## Baseline
 
@@ -50,20 +55,20 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | ID | St | Severity | Title |
 | -- | -- | -------- | ----- |
 | [C1](#c1) | ⬜ | CRITICAL | Slash commands block the Bubbletea event loop — unrecoverable freeze |
-| [C2](#c2) | ⬜ | CRITICAL | `contextmgr.Fit` can return only the system message |
+| [C2](#c2) | ✅ | CRITICAL | `contextmgr.Fit` can return only the system message |
 | [C3](#c3) | ✅ | CRITICAL | Daily fallback silently overwrites a hand-edited draft |
 | [H1](#h1) | ✅ | HIGH | Telegram bot token leaks on screen through `*url.Error` |
-| [H2](#h2) | ⬜ | HIGH | Local-vs-UTC day boundary mismatch |
+| [H2](#h2) | ✅ | HIGH | Local-vs-UTC day boundary mismatch |
 | [H3](#h3) | ⬜ | HIGH | No Telegram 4096-char handling — long dailies never deliver |
 | [H4](#h4) | ⬜ | HIGH | TUI never renders the markup it asks the LLM to produce |
 | [H5](#h5) | ⬜ | HIGH | Daily format spec forked three ways, already drifted |
-| [H6](#h6) | ⬜ | HIGH | Malformed tool-call JSON silently swallowed in 4 handlers |
+| [H6](#h6) | ✅ | HIGH | Malformed tool-call JSON silently swallowed in 4 handlers |
 | [H7](#h7) | ⬜ | HIGH | `pushSync` discards Plane errors with zero signal |
-| [M1](#m1) | ⬜ | MEDIUM | `config.json` is world-readable and written non-atomically |
+| [M1](#m1) | ✅ | MEDIUM | `config.json` is world-readable and written non-atomically |
 | [M2](#m2) | ⬜ | MEDIUM | `/key` echoes the secret and keeps it in input history |
 | [M3](#m3) | ⬜ | MEDIUM | `tui.go` is a 2503-line god-object |
 | [M4](#m4) | ⬜ | MEDIUM | `send_daily` advertised to the LLM without Telegram configured |
-| [M5](#m5) | ⬜ | MEDIUM | `dayFrom` swallows bad dates; slash path rejects them |
+| [M5](#m5) | ✅ | MEDIUM | `dayFrom` swallows bad dates; slash path rejects them |
 | [M6](#m6) | ⬜ | MEDIUM | `Dispatch` is exported with no nil-dependency guards |
 | [M7](#m7) | ⬜ | MEDIUM | SQLite opened without `busy_timeout` / WAL / conn limit |
 | [M8](#m8) | ⬜ | MEDIUM | `Syncer.Push` can create duplicate Plane issues |
@@ -72,7 +77,7 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | [M11](#m11) | ⬜ | MEDIUM | `internal/tui` imports concrete adapters, duplicating wiring |
 | [M12](#m12) | ⬜ | MEDIUM | `Definitions()` / `Dispatch()` are two hand-synced registries |
 | [M13](#m13) | ⬜ | MEDIUM | No CI |
-| [M14](#m14) | ⬜ | MEDIUM | `buildDaily` hardcodes "hoy" for every date |
+| [M14](#m14) | ✅ | MEDIUM | `buildDaily` hardcodes "hoy" for every date |
 | [M15](#m15) | ⬜ | MEDIUM | No `list_dailies` tool — README oversells conversational parity |
 | [N1](#n1) | ⬜ | MEDIUM | `persistDaily` discards the save error — "daily ready" can be a lie |
 | [L1–L14](#low) | ⬜ | LOW | Cleanup, docs drift, cosmetics |
@@ -110,7 +115,7 @@ timeout to `memory.defaultRun` specifically — it has no bound of any kind.
 
 ---
 
-### C2 — `contextmgr.Fit` can return only the system message {#c2} **[verified]**
+### C2 — `contextmgr.Fit` can return only the system message {#c2} ✅ DONE **[verified]**
 
 **Where:** `internal/contextmgr/contextmgr.go:39-53`
 
@@ -131,13 +136,37 @@ provider call carries the system prompt and **nothing else** — no user request
 no tool result. The model answers from a blank slate; from its point of view the
 conversation silently reset. No error is raised anywhere.
 
-**Fix:** after the orphan pass, if `kept` is empty but `rest` is not, fall back to
-the newest non-`RoleTool` message (or truncate the oversized tool result rather
-than dropping its context). Whatever the policy, make it explicit.
+**Worse than originally reported.** While proving the new test had teeth, the
+revert surfaced a case the audit missed: **with no leading system message the old
+code returned a completely empty slice**, not merely a system-only one. That is an
+outright invalid request body, not just a blank-slate model. Same root cause, same
+fix.
 
-**Test gap:** `TestFitDropsOrphanToolResult` only covers the case where a small
-trailing user message survives. Add: *`Fit` never returns a system-only window
-when the input has ≥1 non-system message.*
+**Fix applied:** after the anti-orphan pass, if `kept` is empty but `rest` is not,
+fall back to `suffixFromNewestNonTool(rest)` — the suffix starting at the newest
+non-`RoleTool` message.
+
+Chosen over "pair the oversized tool result with its assistant tool-call" because
+it always keeps a **contiguous suffix**, so every `tool_result` following the
+anchor is included and no `tool_use` is left unanswered. The pairing option would
+have had to special-case parallel tool calls. Budget deliberately loses here —
+the same trade the pre-existing "always keep at least one recent message" rule
+already makes, and the alternative was a silent conversation reset with no error.
+
+**Invariant now guaranteed and documented on `Fit`:** if the input has ≥1
+non-system message, the output has ≥1 non-system message and never starts on an
+orphan tool result. (Degenerate exception, documented: a malformed history whose
+non-system messages are *all* tool results has no valid window.)
+
+**Landed in:** `internal/contextmgr/contextmgr.go` (`Fit`, new
+`suffixFromNewestNonTool` helper — signature unchanged)
+
+**Tests added** (`internal/contextmgr/contextmgr_test.go`):
+- `TestFitKeepsOversizedToolResultWithItsCall` — the exact C2 trace.
+- `TestFitAlwaysKeepsAValidNonSystemWindow` — property-style, 5 shapes × 4 budgets.
+
+**`TestFitDropsOrphanToolResult` still passes unmodified** — it encoded correct
+behavior, not the bug, and never reaches the new fallback.
 
 ---
 
@@ -247,7 +276,7 @@ returned error. Verified to fail against the old behavior.
 
 ---
 
-### H2 — Local-vs-UTC day boundary mismatch {#h2} **[verified]**
+### H2 — Local-vs-UTC day boundary mismatch {#h2} ✅ DONE **[verified]**
 
 **Where:** `internal/tui/tui.go:1348-1359` (`parseDay`), `internal/tools/tools.go:281-292` (`dayFrom`), `internal/store/sqlite.go:217,291`
 
@@ -261,12 +290,24 @@ returned error. Verified to fail against the old behavior.
 shifted five hours. A task touched at 20:00 local appears in one and not the
 other. Same bug on the agent path via `dayFrom`, and on `/todo <status> <day>`.
 
-**Fix:** `time.ParseInLocation("2006-01-02", tok, time.Local)` in both parsers.
+**Fix applied:** `time.ParseInLocation("2006-01-02", tok, time.Local)` in both
+parsers, with the reason recorded in each doc comment.
 
-**Test gap:** `TestParseDay` only compares `.Format("2006-01-02")` strings, which
-passes regardless of Location — it asserts formatting trivia, not behavior. Add:
-*two tasks straddling the offset boundary return the same set via `"hoy"` and via
-the equivalent explicit date.*
+**Landed in:** `internal/tui/tui.go` (`parseDay`), `internal/tools/tools.go`
+(`dayFrom` — see also [M5](#m5), fixed in the same pass)
+
+**Tests added:** `TestParseDayUsesLocalLocation` (`internal/tui/daily_test.go`),
+`TestDayFromKeepsLocalDayWindow` (`internal/tools/tools_test.go`).
+
+Both assert `.Location() == time.Local` directly and compare the **derived
+midnight windows**, never `.Format("2006-01-02")` strings — that string
+comparison is precisely what let this hide in `TestParseDay`. The Location
+assertion has teeth on any machine, because `time.Local` and `time.UTC` are
+distinct `Location` values even where the offset is zero; a CI running in UTC
+would otherwise pass with the bug intact.
+
+Additionally verified end to end under `TZ=America/Bogota` (the UTC-5 case from
+the finding).
 
 ---
 
@@ -343,7 +384,7 @@ and `tui.go` consume it. This collapses A–F into a single source of truth.
 
 ---
 
-### H6 — Malformed tool-call JSON silently swallowed {#h6}
+### H6 — Malformed tool-call JSON silently swallowed {#h6} ✅ DONE
 
 **Where:** `internal/tools/tools.go:298, 334, 348, 522`
 
@@ -356,10 +397,20 @@ of an error the agent loop could react to, the tool silently defaults to **today
 and **actually delivers a Telegram message** — a wrong, externally-visible side
 effect with no error signal anywhere.
 
-**Fix:** return the unmarshal error in all four, matching the other handlers.
+**Fix applied:** all four now return `fmt.Errorf("<tool>: bad args: %w", err)`,
+the exact convention the other 11 handlers already use.
 
-**Test gap:** no test calls `Dispatch` with malformed JSON. Add
-`Dispatch(ctx, "send_daily", "{not json")` → expect an error, for all four.
+Legitimate no-arg calls are unaffected: `orEmptyObj` rewrites `""` to `"{}"`
+before the unmarshal. This was **verified with a dedicated test rather than
+assumed** — it is the obvious way an over-eager fix breaks the tools.
+
+**Landed in:** `internal/tools/tools.go` (`listDayTasks`, `getDaily`,
+`sendDaily`, `listTasks`)
+
+**Tests added** (`internal/tools/tools_test.go`):
+- `TestDispatchRejectsMalformedArgs` — `"{not json"` errors for all four, **and
+  the fake Telegram received nothing** (the side effect is what made this HIGH).
+- `TestDispatchAcceptsEmptyArgs` — `""` and `"{}"` still succeed for all four.
 
 ---
 
@@ -391,7 +442,7 @@ startup or per-N-failures warning. Keep the operation non-fatal.
 
 ## MEDIUM
 
-### M1 — `config.json` is world-readable and written non-atomically {#m1}
+### M1 — `config.json` is world-readable and written non-atomically {#m1} ✅ DONE
 
 **Where:** `internal/config/config.go:179-188`
 
@@ -401,7 +452,33 @@ Any other local account can read them. The write also goes straight to the final
 path — a crash mid-write truncates `config.json` and loses all configuration on
 next `Load`, with no backup.
 
-**Fix:** `0o700` dir, `0o600` file, and write via temp-file + `os.Rename`.
+**Fix applied:** `0o700` dir (plus a best-effort `os.Chmod` to tighten a legacy
+`0755` dir, whose failure never breaks an otherwise valid save), and an atomic
+write: `os.CreateTemp` in the **same** directory → write → `Sync` → `Close` →
+explicit `os.Chmod(tmp, 0o600)` → `os.Rename`. A deferred cleanup removes the
+temp file on any pre-rename failure.
+
+**Two gotchas that make the naive fix wrong** — worth remembering, they apply
+anywhere in this codebase:
+
+1. `os.WriteFile` does **not** re-apply its mode argument to an already-existing
+   file (same for `MkdirAll` on an existing dir). Simply changing `0o644` to
+   `0o600` leaves every pre-existing `config.json` world-readable forever.
+2. `os.Rename` preserves the **source** inode's mode, so the `Chmod` on the temp
+   file is the load-bearing step that makes the result `0600` even when the
+   destination already existed as `0644`.
+
+**Landed in:** `internal/config/config.go` (`Save` — signature unchanged)
+
+**Tests added** (`internal/config/config_test.go`): `TestSaveUsesPrivateFileMode`,
+`TestSaveOverExistingFileKeepsPrivateMode`, `TestSaveUsesPrivateDirMode`,
+`TestSaveLeavesNoTempFiles`.
+
+`TestSaveOverExistingFileKeepsPrivateMode` is the important one: it chmods the
+file back to `0644` between saves and **fails against a naive `os.WriteFile`
+fix**, verified by trying exactly that. `TestSaveUsesPrivateDirMode` uses a
+nested path on purpose — `t.TempDir()` is already `0700`, so a directory test
+written against it directly would pass vacuously.
 
 ### M2 — `/key` echoes the secret and keeps it in input history {#m2}
 
@@ -456,7 +533,7 @@ promised a delivery the system knew in advance it could not make.
 
 **Fix:** gate registration on `r.tg != nil && r.tg.Configured()`.
 
-### M5 — `dayFrom` swallows bad dates {#m5}
+### M5 — `dayFrom` swallows bad dates {#m5} ✅ DONE
 
 **Where:** `internal/tools/tools.go:281-292` vs `internal/tui/tui.go:1348-1359`
 
@@ -464,7 +541,18 @@ promised a delivery the system knew in advance it could not make.
 `dayFrom` silently returns `time.Now()`. "armá el daily del 32 de enero"
 quietly becomes today's.
 
-**Fix:** return an error and let the agent loop see it.
+**Fix applied:** `dayFrom` signature is now `(time.Time, error)`. Unparseable
+input returns `date must be today | yesterday | YYYY-MM-DD, got %q`. The empty
+string still means today — that is the intentional no-arg default, not garbage.
+
+**Landed in:** `internal/tools/tools.go` — `dayFrom` plus its four callers
+(`listDayTasks`, `saveDaily`, `getDaily`, `sendDaily`), each wrapping the failure
+as `fmt.Errorf("<tool>: %w", err)`. Nothing outside the package calls it; the TUI
+has its own `parseDay`, which already rejected garbage.
+
+**Test added:** `TestDayFromRejectsInvalidDate` — rejects `"2026-13-45"`,
+`"mañana-quizá"` and `"32/01/2026"`, confirms `""` still means today, and checks
+the rejection surfaces through `Dispatch` for `get_daily` and `list_day_tasks`.
 
 ### M6 — `Dispatch` is exported with no nil-dependency guards {#m6}
 
@@ -555,13 +643,17 @@ No `.github/`, no workflow files, no pre-commit hooks anywhere. Nothing enforces
 `go build` / `go vet` / `go test` on push. Notably, the branch is named
 `feat/rutine-repo-actions` — that intent is entirely unstarted.
 
-### M14 — `buildDaily` hardcodes "hoy" {#m14} **[verified]**
+### M14 — `buildDaily` hardcodes "hoy" {#m14} ✅ DONE **[verified]**
 
 **Where:** `internal/tui/tui.go:1587`
 
 `b.WriteString("\n(sin actividad registrada hoy)")` inside a function whose whole
 input is a parameterized date. `/daily ayer` and `/daily 2026-01-05` both print
 "hoy".
+
+**Fix applied:** now `(sin actividad registrada)` — the digest already carries the
+date in its header, so no date word is needed at all. `TestBuildDailyEmpty` passes
+unmodified (it asserts on `"sin actividad"`).
 
 ### M15 — No `list_dailies` tool {#m15}
 
@@ -635,15 +727,16 @@ the write succeeded.
 
 | Priority | St | Test to add |
 | -------- | -- | ----------- |
-| 1 | ⬜ | `Fit` never returns a system-only window when the input has ≥1 non-system message ([C2](#c2)) |
+| 1 | ✅ | `Fit` never returns a system-only (or empty) window when the input has ≥1 non-system message ([C2](#c2)) — 2 tests |
 | 2 | ✅ | LLM-failure path does **not** overwrite the stored daily ([C3](#c3)) — 3 tests |
 | 3 | ✅ | The Telegram bot token never appears in any error returned by `Send` ([H1](#h1)) |
-| 4 | ⬜ | `"hoy"` and the equivalent `YYYY-MM-DD` return the same task set across the offset boundary ([H2](#h2)) — the current `TestParseDay` asserts formatting, not behavior |
-| 5 | ⬜ | `Dispatch` with malformed JSON returns an error for `send_daily`, `get_daily`, `list_day_tasks`, `list_tasks` ([H6](#h6)) |
+| 4 | ✅ | `"hoy"` and the equivalent `YYYY-MM-DD` resolve to the same local window ([H2](#h2)) — 2 tests, replacing the formatting-only assertion |
+| 5 | ✅ | `Dispatch` with malformed JSON errors for `send_daily`, `get_daily`, `list_day_tasks`, `list_tasks` — and empty args still work ([H6](#h6)) |
 | 6 | ⬜ | A >4096-char daily is chunked or truncated, not dropped ([H3](#h3)) |
 | 7 | ⬜ | Agent max-steps exhaustion: error returned, and `History()` left in a defined state ([M10](#m10)) |
 | 8 | ⬜ | `PullStates` behavior when task A fails and task B follows ([M9](#m9)) |
 | 9 | ⬜ | `persistDaily` failure is reported instead of announcing "ready" ([N1](#n1)) |
+| 10 | ✅ | `config.json` keeps `0600` across rewrites, dir is `0700`, no temp files left ([M1](#m1)) — 4 tests |
 
 ---
 
@@ -685,11 +778,13 @@ Recorded so future audits don't re-litigate these:
 ## Suggested order of attack
 
 1. ✅ **Stop the bleeding — data loss and credential leak:** ~~[C3](#c3)~~,
-   ~~[H1](#h1)~~ done. **[M1](#m1) still open** (config file perms + atomic write).
-2. **Correctness:** [C2](#c2), [H2](#h2), [H6](#h6), [M14](#m14). Also small, and
-   [C2](#c2)/[H2](#h2) are the two most likely to be silently wrong right now.
-3. **Unfreeze the UI:** [C1](#c1). Larger — it touches every blocking branch of
-   `runCommand` — but it is the worst user-facing failure.
+   ~~[H1](#h1)~~, ~~[M1](#m1)~~ — all done.
+2. ✅ **Correctness:** ~~[C2](#c2)~~, ~~[H2](#h2)~~, ~~[H6](#h6)~~, ~~[M5](#m5)~~,
+   ~~[M14](#m14)~~ — all done.
+3. **← NEXT · Unfreeze the UI:** [C1](#c1). Larger — it touches every blocking
+   branch of `runCommand` — but it is the worst user-facing failure. Pick up
+   [N1](#n1) along the way: `persistDaily` sits on the same missing-timeout
+   surface.
 4. **Collapse the daily spec:** [H5](#h5) → one `internal/daily` package. Do this
    *before* [H4](#h4), since the renderer should consume the same constants.
 5. **Then [H4](#h4)** (render + wrap), which also fixes the selection desync.
