@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/webcloster-dev/planner/internal/llm"
@@ -61,6 +62,83 @@ func TestAgentPlainAnswer(t *testing.T) {
 	}
 	if out != "hi" {
 		t.Fatalf("got %q", out)
+	}
+}
+
+// loopingProvider keeps asking for the same tool forever, so the agent burns
+// through maxSteps. Setting answer makes it return a plain reply instead, which
+// lets a test continue the conversation after exhaustion.
+type loopingProvider struct {
+	calls  int
+	answer string
+}
+
+func (p *loopingProvider) Name() string { return "looping" }
+
+func (p *loopingProvider) Chat(_ context.Context, _ []llm.Message, _ []llm.Tool) (llm.Response, error) {
+	p.calls++
+	if p.answer != "" {
+		return llm.Response{Content: p.answer}, nil
+	}
+	return llm.Response{ToolCalls: []llm.ToolCall{
+		{ID: "call", Name: "list_tasks", Arguments: `{}`},
+	}}, nil
+}
+
+func TestAgentMaxStepsExhaustionLeavesUsableHistory(t *testing.T) {
+	prov := &loopingProvider{}
+	a := New(prov, &fakeDispatcher{}, "system")
+
+	out, err := a.Send(context.Background(), "loop forever")
+	if err == nil {
+		t.Fatal("expected max steps error, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeded max steps") || !strings.Contains(err.Error(), "8") {
+		t.Fatalf("error should mention the step limit, got %q", err)
+	}
+	if out != "" {
+		t.Fatalf("expected empty output on exhaustion, got %q", out)
+	}
+	if prov.calls != a.maxSteps {
+		t.Fatalf("expected exactly %d provider calls, got %d", a.maxSteps, prov.calls)
+	}
+
+	// The real fix: the conversation must not be left dangling on tool results.
+	hist := a.History()
+	if len(hist) == 0 {
+		t.Fatal("history is empty")
+	}
+	last := hist[len(hist)-1]
+	if last.Role != llm.RoleAssistant {
+		t.Fatalf("history must end on an assistant turn, ended on %q (content %q)", last.Role, last.Content)
+	}
+	if len(last.ToolCalls) != 0 {
+		t.Fatalf("closing assistant message must not request more tools: %v", last.ToolCalls)
+	}
+	if last.Content == "" {
+		t.Fatal("closing assistant message must carry text explaining the cut-off")
+	}
+
+	// And the conversation stays usable: a follow-up turn still works.
+	prov.answer = "recovered"
+	got, err := a.Send(context.Background(), "what happened?")
+	if err != nil {
+		t.Fatalf("follow-up Send failed: %v", err)
+	}
+	if got != "recovered" {
+		t.Fatalf("follow-up answer: %q", got)
+	}
+	hist = a.History()
+	if hist[len(hist)-1].Role != llm.RoleAssistant || hist[len(hist)-1].Content != "recovered" {
+		t.Fatalf("follow-up did not land as the final assistant turn: %+v", hist[len(hist)-1])
+	}
+	// The user message of the follow-up must sit right after an assistant turn.
+	userIdx := len(hist) - 2
+	if hist[userIdx].Role != llm.RoleUser {
+		t.Fatalf("expected user message at %d, got %q", userIdx, hist[userIdx].Role)
+	}
+	if hist[userIdx-1].Role != llm.RoleAssistant {
+		t.Fatalf("follow-up user message follows %q, want assistant", hist[userIdx-1].Role)
 	}
 }
 
