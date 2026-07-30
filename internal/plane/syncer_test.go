@@ -3,6 +3,7 @@ package plane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -175,5 +176,88 @@ func TestSyncerNotConfigured(t *testing.T) {
 	// Push is a no-op when unconfigured (doesn't touch the nil store).
 	if err := sy.Push(context.Background(), &domain.Task{}); err != nil {
 		t.Fatalf("unconfigured push should be a no-op, got %v", err)
+	}
+}
+
+// flakyStore wraps a real store and fails the first failUpdates calls to
+// Update, so a transient local write failure can be exercised.
+type flakyStore struct {
+	store.TaskStore
+	failUpdates int
+	updates     int
+}
+
+func (f *flakyStore) Update(ctx context.Context, t domain.Task) error {
+	f.updates++
+	if f.updates <= f.failUpdates {
+		return errors.New("database is locked")
+	}
+	return f.TaskStore.Update(ctx, t)
+}
+
+// A transient failure to record the new work item must be retried: the item
+// already exists in Plane, and losing its id makes the next push duplicate it.
+func TestSyncerPushRetriesTransientLinkFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Write([]byte(`{"results":[]}`))
+		case http.MethodPatch:
+			w.Write([]byte(`{}`))
+		default:
+			w.Write([]byte(`{"id":"wi-9","sequence_id":11}`))
+		}
+	}))
+	defer srv.Close()
+
+	real, _ := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	defer real.Close()
+	created, _ := real.Create(context.Background(), domain.Task{
+		Label: "a", Type: domain.TypeFeat, Title: "X", Status: domain.StatusUnstarted,
+	})
+	st := &flakyStore{TaskStore: real, failUpdates: 1}
+
+	sy := NewSyncer(testClient(srv.URL), st, nil)
+	if err := sy.Push(context.Background(), &created); err != nil {
+		t.Fatalf("a transient link failure should be retried, got %v", err)
+	}
+	got, _ := real.Get(context.Background(), created.ID)
+	if got.WorkItemID != "wi-9" {
+		t.Fatalf("work item id not linked after retry, got %q", got.WorkItemID)
+	}
+}
+
+// When the link cannot be written at all, the error must name the orphaned work
+// item — a silent failure here becomes a duplicate work item on the next push.
+func TestSyncerPushNamesOrphanedWorkItem(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Write([]byte(`{"results":[]}`))
+		default:
+			w.Write([]byte(`{"id":"wi-7","sequence_id":42}`))
+		}
+	}))
+	defer srv.Close()
+
+	real, _ := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	defer real.Close()
+	created, _ := real.Create(context.Background(), domain.Task{
+		Label: "a", Type: domain.TypeFeat, Title: "X", Status: domain.StatusUnstarted,
+	})
+	st := &flakyStore{TaskStore: real, failUpdates: 99}
+
+	sy := NewSyncer(testClient(srv.URL), st, nil)
+	err := sy.Push(context.Background(), &created)
+	if err == nil {
+		t.Fatal("a permanent link failure must surface")
+	}
+	for _, want := range []string{"wi-7", "#42", "duplicate"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error must name the orphan and the risk, %q missing from: %v", want, err)
+		}
+	}
+	if st.updates != linkRetries {
+		t.Fatalf("expected %d attempts, got %d", linkRetries, st.updates)
 	}
 }

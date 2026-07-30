@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/webcloster-dev/planner/internal/domain"
 	"github.com/webcloster-dev/planner/internal/store"
@@ -136,7 +137,7 @@ func (s *Syncer) Push(ctx context.Context, t *domain.Task) error {
 		// Persist the link BEFORE the rename: the work item already exists, so if
 		// the rename fails we must not forget its id — otherwise the next push
 		// would create a duplicate work item.
-		if err := s.store.Update(ctx, *t); err != nil {
+		if err := s.persistLink(ctx, t); err != nil {
 			return err
 		}
 		if ref.Seq > 0 {
@@ -148,6 +149,41 @@ func (s *Syncer) Push(ctx context.Context, t *domain.Task) error {
 		return err
 	}
 	return s.store.Update(ctx, *t)
+}
+
+// linkRetries is how many times persistLink tries the local write, and the
+// delay before the first retry (doubling each time). Small on purpose: the
+// store's own busy timeout already absorbs contention, so anything still
+// failing here is unlikely to be transient.
+const (
+	linkRetries    = 3
+	linkRetryDelay = 50 * time.Millisecond
+)
+
+// persistLink records a freshly created work item on the local task.
+//
+// This write is the one that must not be lost. The work item already exists in
+// Plane, and nothing but this row points at it, so if the write fails the next
+// push takes the "not synced yet" branch and creates a SECOND work item for the
+// same task. Retry the transient case, and when it is not transient say exactly
+// what was orphaned so it can be reconciled by hand — a loud failure beats a
+// silent duplicate.
+func (s *Syncer) persistLink(ctx context.Context, t *domain.Task) error {
+	var err error
+	for attempt := 0; attempt < linkRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(linkRetryDelay << (attempt - 1)):
+			}
+		}
+		if err = s.store.Update(ctx, *t); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("plane work item %s (#%d) was created but could not be linked to task %d locally; "+
+		"re-syncing would create a duplicate: %w", t.WorkItemID, t.WorkItemSeq, t.ID, err)
 }
 
 // Delete removes the work item in Plane. No-op when the task was never synced.
