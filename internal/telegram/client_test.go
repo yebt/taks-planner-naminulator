@@ -62,6 +62,21 @@ func TestSendAPIError(t *testing.T) {
 	}
 }
 
+// The bot token is part of the request URL, so a transport failure must never
+// surface it: the error is rendered straight into the TUI.
+func TestSendTransportErrorHidesToken(t *testing.T) {
+	const token = "123456789:AAHs-this-is-a-secret-bot-token"
+	c := New(token, "chat", "")
+	c.api = "http://127.0.0.1:1" // nothing listening -> connection refused
+	err := c.Send(context.Background(), "x")
+	if err == nil {
+		t.Fatal("expected a transport error")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("bot token leaked into the error: %v", err)
+	}
+}
+
 func TestSendUnconfigured(t *testing.T) {
 	if err := New("", "", "").Send(context.Background(), "x"); err == nil {
 		t.Fatal("unconfigured send should error")
