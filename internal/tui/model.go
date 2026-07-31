@@ -65,6 +65,7 @@ type chatModel struct {
 	dailyEditing   bool            // true while editing the daily in the textarea
 	history        []string        // submitted inputs, for ↑/↓ recall
 	histPos        int             // -1 = not navigating
+	histDraft      string          // what was being typed when history navigation began
 	convID         int64           // 0 = unsaved
 
 	// mouse selection: character-granular, anchored in content coords (line,col)

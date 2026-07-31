@@ -23,6 +23,7 @@ func (m *chatModel) submit() (tea.Model, tea.Cmd) {
 	if !carriesSecret(val) {
 		m.pushHistory(val)
 	}
+	m.resetHistoryNav()
 	m.ta.Reset()
 	m.suggestions = nil
 	m.selected = 0
@@ -123,7 +124,14 @@ func (m *chatModel) pushHistory(val string) {
 	if n := len(m.history); n == 0 || m.history[n-1] != val {
 		m.history = append(m.history, val)
 	}
+}
+
+// resetHistoryNav leaves history navigation, discarding any stashed draft. It
+// lives in submit rather than pushHistory because a secret command is sent
+// without being recorded, and it must still end navigation.
+func (m *chatModel) resetHistoryNav() {
 	m.histPos = -1
+	m.histDraft = ""
 }
 
 func (m *chatModel) historyPrev() {
@@ -131,6 +139,9 @@ func (m *chatModel) historyPrev() {
 		return
 	}
 	if m.histPos == -1 {
+		// Entering history: keep what was being typed, so walking back down
+		// returns it instead of throwing it away.
+		m.histDraft = m.ta.Value()
 		m.histPos = len(m.history)
 	}
 	if m.histPos > 0 {
@@ -147,8 +158,10 @@ func (m *chatModel) historyNext() {
 	}
 	m.histPos++
 	if m.histPos >= len(m.history) {
+		// Past the newest entry: back to whatever was being typed.
 		m.histPos = -1
-		m.ta.SetValue("")
+		m.ta.SetValue(m.histDraft)
+		m.histDraft = ""
 	} else {
 		m.ta.SetValue(m.history[m.histPos])
 	}

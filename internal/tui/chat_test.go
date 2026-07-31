@@ -131,3 +131,58 @@ func TestHistoryRecall(t *testing.T) {
 		}
 	})
 }
+
+// Walking into history and back out must return the half-typed line. Before
+// this, ↑ overwrote the draft and ↓ past the newest entry cleared the prompt, so
+// glancing at a previous command destroyed whatever you were writing.
+func TestHistoryNavigationRestoresTheDraft(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.pushHistory("/todo")
+	m.pushHistory("/dailies")
+	m.resetHistoryNav()
+
+	m.ta.SetValue("armá el daily de ho")
+
+	m.historyPrev()
+	if got := m.ta.Value(); got != "/dailies" {
+		t.Fatalf("↑ should show the newest entry, got %q", got)
+	}
+	m.historyPrev()
+	if got := m.ta.Value(); got != "/todo" {
+		t.Fatalf("↑↑ should show the older entry, got %q", got)
+	}
+
+	m.historyNext()
+	if got := m.ta.Value(); got != "/dailies" {
+		t.Fatalf("↓ should walk back toward the newest, got %q", got)
+	}
+	m.historyNext()
+	if got := m.ta.Value(); got != "armá el daily de ho" {
+		t.Fatalf("↓ past the newest entry must restore the draft, got %q", got)
+	}
+}
+
+// Sending a line ends navigation, so a later ↑↓ does not resurrect a draft that
+// was already submitted. A secret command is sent without being recorded, so it
+// must end navigation too.
+func TestSubmitEndsHistoryNavigation(t *testing.T) {
+	for _, val := range []string{"/todo", "/key kimi sk-secret"} {
+		t.Run(val, func(t *testing.T) {
+			m, _ := newTestModel(t)
+			m.ta.SetValue("a draft")
+			m.pushHistory("/dailies")
+			m.historyPrev() // stashes "a draft"
+
+			m.ta.SetValue(val)
+			m.submit()
+
+			if m.histPos != -1 || m.histDraft != "" {
+				t.Fatalf("submit must end navigation: histPos=%d draft=%q", m.histPos, m.histDraft)
+			}
+			m.historyNext() // a no-op once navigation ended
+			if got := m.ta.Value(); got == "a draft" {
+				t.Fatal("a submitted line must not resurrect the old draft")
+			}
+		})
+	}
+}
