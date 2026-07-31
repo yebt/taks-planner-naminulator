@@ -4,9 +4,12 @@
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 35 / 42 closed. Every CRITICAL, every HIGH and every MEDIUM is
-done**, along with both findings raised during remediation and most of the LOW
-list.
+**Progress: 36 / 43 closed. Every CRITICAL, every HIGH and every MEDIUM is
+done**, along with all three findings raised during remediation and most of the
+LOW list.
+
+Coverage moved with it: `internal/tui` went 29.5% → 48.1%, and the repo's
+weakest packages are now its adapters rather than its core.
 
 The remaining 7 are LOW items **deliberately declined**, each with a reason —
 see [Declined](#declined). They are not backlog; they are decisions.
@@ -92,6 +95,7 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | [M15](#m15) | ✅ | MEDIUM | No `list_dailies` tool — README oversells conversational parity |
 | [N1](#n1) | ✅ | MEDIUM | `persistDaily` discards the save error — "daily ready" can be a lie |
 | [N2](#n2) | ✅ | LOW | Startup warnings show their backticks literally |
+| [N3](#n3) | ✅ | MEDIUM | History navigation destroyed the draft in progress |
 | [L1–L14](#low) | ⬜ | LOW | Cleanup, docs drift, cosmetics |
 
 Findings discovered *during* remediation are filed under [New findings](#new)
@@ -1256,6 +1260,36 @@ completeness.
 | 11 | ✅ | Blocking commands return a `tea.Cmd` and never run inside `Update()` ([C1b](#c1)) — 5 tests |
 | 12 | ✅ | A hung engram times out instead of blocking forever ([C1a](#c1)) — 3 tests |
 | 10 | ✅ | `config.json` keeps `0600` across rewrites, dir is `0700`, no temp files left ([M1](#m1)) — 4 tests |
+
+---
+
+### N3 — history navigation destroyed the draft {#n3} ✅ DONE
+
+**Where:** `internal/tui/chat.go` — `historyPrev`, `historyNext`
+
+Found while raising `internal/tui` coverage, and found in the most useful way
+possible: the brief asked for a test that "the draft in progress is not
+destroyed", and **the implementer reported that the behaviour did not exist
+rather than writing a test that would fail**. That is the right instinct — a
+test bent until it passes is worse than no test.
+
+`historyPrev` overwrote the textarea unconditionally; `historyNext` walking past
+the newest entry set it to `""`. So typing a line, pressing ↑ to glance at a
+previous command, then ↓ to come back left the prompt empty and the draft
+unrecoverable.
+
+**Fix applied:** a `histDraft` field stashes the line on entering history and
+restores it on leaving.
+
+**A second defect surfaced while fixing it, and it was mine.** [M2](#m2) made
+`submit` skip `pushHistory` for secret commands — but `pushHistory` was also
+where history navigation got reset, so sending a `/key` left navigation state
+dangling. The reset moved into `submit` as `resetHistoryNav`, which always runs.
+`pushHistory` now only appends, which is what its name promised all along.
+
+**Tests added:** `TestHistoryNavigationRestoresTheDraft` and
+`TestSubmitEndsHistoryNavigation` (table-driven over an ordinary and a secret
+command, so the [M2](#m2) interaction stays pinned).
 
 ---
 
