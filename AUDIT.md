@@ -1,18 +1,20 @@
 # Audit — planner
 
-**Audited:** 2026-07-29 · **Last updated:** 2026-07-30
+**Audited:** 2026-07-29 · **Last updated:** 2026-08-03
 **Audited at commit:** `a088da8`
 **Branch:** `feat/rutine-repo-actions` (identical to `main`, 0 commits ahead/behind)
 
-**Progress: 36 / 43 closed. Every CRITICAL, every HIGH and every MEDIUM is
-done**, along with all three findings raised during remediation and most of the
-LOW list.
+**Progress: 37 / 44 closed — nothing is open.** Every CRITICAL, every HIGH and
+every MEDIUM is done, along with all three findings raised during remediation and
+every actionable LOW.
 
 Coverage moved with it: `internal/tui` went 29.5% → 48.1%, and the repo's
 weakest packages are now its adapters rather than its core.
 
 The remaining 7 are LOW items **deliberately declined**, each with a reason —
 see [Declined](#declined). They are not backlog; they are decisions.
+
+Both open test gaps closed too, so the table below has no `⬜` left in it either.
 [C1](#c1) ✅ [C2](#c2) ✅ [C3](#c3) ✅ · [H1](#h1) ✅ [H2](#h2) ✅ [H3](#h3) ✅
 [H4](#h4) ✅ [H5](#h5) ✅ [H6](#h6) ✅ [H7](#h7) ✅ · [M1](#m1) ✅ [M5](#m5) ✅
 [M14](#m14) ✅ · [N1](#n1) ✅
@@ -62,7 +64,7 @@ Nothing is broken. Everything below is latent risk, drift, or an unfinished deci
 
 ## Severity index
 
-Status: ✅ done · 🔧 in progress · ⬜ open
+Status: ✅ done · ⬜ open · ➖ declined
 
 | ID | St | Severity | Title |
 | -- | -- | -------- | ----- |
@@ -96,7 +98,8 @@ Status: ✅ done · 🔧 in progress · ⬜ open
 | [N1](#n1) | ✅ | MEDIUM | `persistDaily` discards the save error — "daily ready" can be a lie |
 | [N2](#n2) | ✅ | LOW | Startup warnings show their backticks literally |
 | [N3](#n3) | ✅ | MEDIUM | History navigation destroyed the draft in progress |
-| [L1–L14](#low) | ⬜ | LOW | Cleanup, docs drift, cosmetics |
+| [L2–L5, L7, L8, L13, L14](#low) | ✅ | LOW | Cleanup, docs drift, cosmetics |
+| [L1, L6, L9–L12](#low) | ➖ | LOW | [Declined](#declined) with reasons — decisions, not backlog |
 
 Findings discovered *during* remediation are filed under [New findings](#new)
 and carry an `N` prefix.
@@ -105,7 +108,7 @@ and carry an `N` prefix.
 
 ## CRITICAL
 
-### C1 — Slash commands block the Bubbletea event loop {#c1} 🔧 PARTIAL
+### C1 — Slash commands block the Bubbletea event loop {#c1} ✅ DONE
 
 **Where:** `internal/tui/tui.go:616-643` (`submit`), `855-1041` (`runCommand`), `internal/memory/memory.go:38-40`
 
@@ -1229,18 +1232,18 @@ completeness.
 | -- | ----- | ---- |
 | L1 | `tui.go` ×25 (`1003, 1015, 1030, 1110, 1249, 1385, 1506, 1520, 1544, 1601, …`) | The `if err != nil { m.add("err", …); return }` idiom is duplicated 25 times while the existing `report()` helper (`1062-1068`) is used only 4 times. |
 | L2 ✅ | `tui.go:75, 80-86, 2434` | ~~Nine lines of commented-out code referencing `inputBG`, an identifier that no longer exists anywhere — it would not even compile if uncommented. Dead remnant of a reverted theme.~~ **Done**, together with two duplicated doc comments left on `syncAll` and `sendDaily` when [C1b](#c1) moved them off the event loop. Cleaned in a commit separate from the [M3](#m3) move, so the move stayed pure. |
-| L3 | `plane/syncer.go:17` | Comment says `stateDefaults` is "reserved for state mapping" (it is actively used at `114-116`) and that it holds state **names** (it holds **ids** — `config.go:23`, `tui/config.go:270`). Wrong on both counts. |
-| L4 | `main.go:106` | `usage()` advertises a stale command subset — missing `/state`, `/drop`, `/sync`, `/pull`, `/project`, `/person`, `/fav`. |
-| L5 | README:25-30, 88-100 | Undocumented: `/todos`, `/exit`, `/q` aliases; `ctrl+u`/`ctrl+d` scroll; `ctrl+p`/`ctrl+n` menu nav; `planner chat`; `planner -h`; the `/state` picker keys. (No documented-but-missing commands — every README command resolves.) |
+| L3 ✅ | `plane/syncer.go:17` | ~~Comment says `stateDefaults` is "reserved for state mapping" (it is actively used at `114-116`) and that it holds state **names** (it holds **ids** — `config.go:23`, `tui/config.go:270`). Wrong on both counts.~~ **Done** — now reads `Plane state group -> chosen state id, used by resolveStateID`, naming both the real content and the real consumer. |
+| L4 ✅ | `main.go:106` | ~~`usage()` advertises a stale command subset — missing `/state`, `/drop`, `/sync`, `/pull`, `/project`, `/person`, `/fav`.~~ **Done** — rewritten as grouped lines (tasks / plane / dailies / llm / context / session) covering every command. |
+| L5 ✅ | README:25-30, 88-100 | ~~Undocumented: `/todos`, `/exit`, `/q` aliases; `ctrl+u`/`ctrl+d` scroll; `ctrl+p`/`ctrl+n` menu nav; `planner chat`; `planner -h`; the `/state` picker keys. (No documented-but-missing commands — every README command resolves.)~~ **Done**, and then **enforced** — see the [Declined](#declined) note below, which this superseded. |
 | L6 | `tui.go:1609, 1620, 1776, 678-721, 1806-1912` | The Spanish/English boundary drifts field by field rather than following a documented rule: English `projects · %d` header over a Spanish `Notas` block; English command chrome with fully Spanish `buildMentionContext`; Spanish `Estado`/`Objetivo` labels under an English `/task` usage string. |
-| L7 | `tui.go:2405-2408` | `vpH := m.height - len(m.suggestions) - inputH - 5` — `inputH` is named, the sibling `5` bundles five distinct rows into a literal nothing forces to stay in sync with `View()`. |
-| L8 | `go.mod:3` | `go 1.26.4` pins a patch-level toolchain in the `go` directive; anyone on 1.26.0–1.26.3 is forced into a toolchain download. Convention is `go 1.26` + a separate `toolchain` line. |
+| L7 ✅ | `tui.go:2405-2408` | ~~`vpH := m.height - len(m.suggestions) - inputH - 5` — `inputH` is named, the sibling `5` bundles five distinct rows into a literal nothing forces to stay in sync with `View()`.~~ **Done** — the literal is now `chromeH` (`render.go:125`), named next to the rows it counts. |
+| L8 ✅ | `go.mod:3` | ~~`go 1.26.4` pins a patch-level toolchain in the `go` directive; anyone on 1.26.0–1.26.3 is forced into a toolchain download. Convention is `go 1.26` + a separate `toolchain` line.~~ **Done** — the directive is `go 1.26`. |
 | L9 | `store/context.go:16-35, 86-103` | `slug`/`nick` are `COLLATE NOCASE PRIMARY KEY`, so `ON CONFLICT DO UPDATE` matches case-insensitively but never rewrites the stored casing. Create `Liquida`, upsert `liquida` → DB keeps `Liquida` but the returned view says `+liquida`. |
 | L10 | `llm/openai.go:139-141`, `llm/claude.go:148-150` | Every non-2xx (including 429) is a terminal error — no `Retry-After`, no single backoff retry. Visible, not auto-recovered. Acceptable for a local tool; noted for completeness. |
 | L11 | `telegram/client.go:72-83` | If Telegram rejects the HTML for an edge case, the send fails outright with no retry using plain text. `toHTML` always produces balanced tags so this is unlikely, but there is no degradation path. |
 | L12 | `plane/client.go:190-192` | The raw Plane response body is echoed verbatim into the TUI. No credential leak (the token travels in the `X-API-Key` header, never the URL), but unfiltered server text reaches the screen. |
-| L13 | git | `feat/rutine-repo-actions` is a bare pointer at `main` — 0 ahead, 0 behind, clean tree, already pushed. Nothing half-landed because nothing is on it. |
-| L14 | `.gitignore` | `*.db` is ignored; `config.json` (which holds the actual secrets) is not explicitly listed. Nothing indicates it is tracked today, but the guard is missing. |
+| L13 ➖ | git | `feat/rutine-repo-actions` is a bare pointer at `main` — 0 ahead, 0 behind, clean tree, already pushed. Nothing half-landed because nothing is on it. Resolved by the work rather than by a fix — see [Declined](#declined). |
+| L14 ✅ | `.gitignore` | ~~`*.db` is ignored; `config.json` (which holds the actual secrets) is not explicitly listed. Nothing indicates it is tracked today, but the guard is missing.~~ **Done** — `config.json` is ignored, with a comment saying why (`holds API keys and tokens in plaintext`). |
 
 ---
 
@@ -1254,8 +1257,8 @@ completeness.
 | 4 | ✅ | `"hoy"` and the equivalent `YYYY-MM-DD` resolve to the same local window ([H2](#h2)) — 2 tests, replacing the formatting-only assertion |
 | 5 | ✅ | `Dispatch` with malformed JSON errors for `send_daily`, `get_daily`, `list_day_tasks`, `list_tasks` — and empty args still work ([H6](#h6)) |
 | 6 | ✅ | A >4096-char daily is chunked, not dropped ([H3](#h3)) — 5 tests |
-| 7 | ⬜ | Agent max-steps exhaustion: error returned, and `History()` left in a defined state ([M10](#m10)) |
-| 8 | ⬜ | `PullStates` behavior when task A fails and task B follows ([M9](#m9)) |
+| 7 | ✅ | Agent max-steps exhaustion: error returned, and `History()` left in a defined state ([M10](#m10)) — `TestAgentMaxStepsExhaustionLeavesUsableHistory` |
+| 8 | ✅ | `PullStates` behavior when task A fails and task B follows ([M9](#m9)) — 3 tests: continues after a failure, reports every failure, clean run returns `nil` |
 | 9 | ✅ | `persistDaily` failure is reported instead of announcing "ready" ([N1](#n1)) |
 | 11 | ✅ | Blocking commands return a `tea.Cmd` and never run inside `Update()` ([C1b](#c1)) — 5 tests |
 | 12 | ✅ | A hung engram times out instead of blocking forever ([C1a](#c1)) — 3 tests |
@@ -1306,7 +1309,7 @@ Not backlog — decisions, with the reason, so nobody re-opens them by reflex.
 | **L11** — no plain-text fallback if Telegram rejects the HTML | `toHTML` only ever emits balanced tags from its own regexes, so a self-inflicted 400 is close to unreachable. A fallback path that is never exercised is a liability: it rots, and it fires on the one case you did not predict. |
 | **L12** — the Plane response body is echoed verbatim into the TUI | The Plane instance is self-hosted and single-tenant, and the token travels in a header rather than the URL ([H1](#h1)), so there is no credential path. Truncating server errors would cost real diagnostic value. |
 | **L13** — the branch was an empty pointer at `main` | Resolved by the work itself rather than by a fix: the branch now carries the audit remediation, and its name finally matches what is on it ([M13](#m13)). |
-| **L4 / L5 partially** — usage and README drift | Closed for commands, keys and aliases. What remains is that nothing *enforces* the match; a test asserting every `baseCommands` entry appears in the README would be the real fix, and it is worth doing only if the drift recurs. |
+| ~~**L4 / L5 partially** — nothing enforces the usage/README match~~ | **Un-declined and closed.** The note said a test asserting every `baseCommands` entry appears in the README "is worth doing only if the drift recurs". It recurred inside this very audit — [M15](#m15) added `/dailies` and [M12](#m12) changed the tool surface — so the guard was written: `TestEveryCommandIsDocumented` (`internal/tui/commands_doc_test.go`) now fails the build for an undocumented command. It asserts **presence only** — pinning wording would be a tax on every prose edit — and its word-boundary logic is tested separately, so the 27 subtests cannot pass vacuously (`/daily` is not satisfied by `/dailies`). |
 
 ---
 
