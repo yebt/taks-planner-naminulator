@@ -22,12 +22,12 @@ go run ./cmd/planner                # start the chat harness (default)
 
 Subcommands:
 
-| Command          | What it does                                             |
-| ---------------- | -------------------------------------------------------- |
-| `planner`        | Start the interactive chat harness (default)             |
-| `planner tui`    | Alias for the chat harness                               |
-| `planner config` | Open the configuration TUI (providers, Plane, Telegram)  |
-| `planner help`   | Show usage                                               |
+| Command                    | What it does                                            |
+| -------------------------- | ------------------------------------------------------- |
+| `planner`                  | Start the interactive chat harness (default)            |
+| `planner chat` / `tui`     | Aliases for the chat harness                            |
+| `planner config`           | Open the configuration TUI (providers, Plane, Telegram) |
+| `planner help` / `-h`      | Show usage                                              |
 
 Files (under `~/.config/planner/`, override the config path with
 `PLANNER_CONFIG`):
@@ -91,6 +91,8 @@ activity-template details (objective, acceptance criteria, etc.).
 | `alt+enter`             | newline (multi-line input)                        |
 | `↑` / `↓`               | recall input history (single-line)                |
 | `pgup` / `pgdn` / wheel | scroll the conversation                           |
+| `ctrl+u` / `ctrl+d`     | scroll half a page                                |
+| `ctrl+p` / `ctrl+n`     | move through the suggestion menu                  |
 | click + drag            | select text (character-granular)                  |
 | right-click             | copy the current selection to the clipboard       |
 | `esc`                   | cancel a selection / close the suggestion menu    |
@@ -143,9 +145,15 @@ start/due dates (defaulting to today / tomorrow).
 - `/dailies` — list stored dailies
 
 You can also drive dailies **in conversation**: the agent has tools to gather a
-day's tasks, write/edit the digest, and send it — e.g. "armá el daily de hoy
-incluyendo las tareas de ayer", "agregá que quedó pendiente el deploy",
-"mostrámelo", "mandalo por Telegram".
+day's tasks (`list_day_tasks`), write or overwrite a digest (`save_daily`), read
+one back (`get_daily`), list the stored ones with a short preview each
+(`list_dailies`), and deliver one to Telegram (`send_daily`, advertised only when
+Telegram is configured) — e.g. "armá el daily de hoy incluyendo las tareas de
+ayer", "agregá que quedó pendiente el deploy", "mostrámelo", "mostrame los
+dailies", "mandalo por Telegram".
+
+Regenerating a digest from scratch is still the slash command's job: `/daily`
+runs a dedicated prompt, so in conversation the agent composes the text itself.
 
 **LLM / providers**
 
@@ -189,7 +197,10 @@ mentioned project record the link (shown in `/task`).
 
 - `/clear` — clear the on-screen conversation and agent history
 - `/help` — list commands
-- `/quit` — exit
+- `/quit` — exit (also `/exit`, `/q`)
+
+`/todos` is an alias for `/todo`. When `/state <id>` opens its picker, `↑`/`↓`
+move, `enter` selects and `esc` cancels.
 
 ---
 
@@ -223,6 +234,10 @@ go test ./...
 
 Adapters (LLM, Plane, Telegram) are tested against `httptest` servers — no live
 API calls; the store, tools, and TUI helpers run against a temp SQLite file.
+
+CI (`.github/workflows/ci.yml`) runs on every push and pull request: `gofmt`,
+`go build`, a second build with `CGO_ENABLED=0` (the pure-Go binary this project
+promises), `go vet`, the suite, and the suite again under `-race`.
 
 ---
 

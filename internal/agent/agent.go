@@ -127,5 +127,15 @@ func (a *Agent) Send(ctx context.Context, input string) (string, error) {
 			})
 		}
 	}
+	// The loop ran out of steps while the model was still asking for tools, so
+	// the history currently ends on tool results. Close the turn with a
+	// synthetic assistant message instead of rolling back: the tool calls
+	// already happened and their results are real work the user may want to
+	// continue from. Leaving the conversation ending on an assistant turn keeps
+	// it well-formed for the next Send.
+	a.messages = append(a.messages, llm.Message{
+		Role:    llm.RoleAssistant,
+		Content: fmt.Sprintf("[stopped after %d tool steps without a final answer]", a.maxSteps),
+	})
 	return "", fmt.Errorf("agent: exceeded max steps (%d)", a.maxSteps)
 }

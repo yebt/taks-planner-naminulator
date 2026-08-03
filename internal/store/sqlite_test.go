@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -250,5 +251,32 @@ func TestSQLiteNotFound(t *testing.T) {
 	}
 	if err := s.Update(context.Background(), domain.Task{ID: 999}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound on update, got %v", err)
+	}
+}
+
+// The pragmas must actually take effect on a live connection, not merely appear
+// in the DSN: a query-string escaping mistake would leave both silently at
+// their defaults, which is exactly the bug this guards against.
+func TestOpenSQLiteAppliesPragmas(t *testing.T) {
+	st, err := OpenSQLite(filepath.Join(t.TempDir(), "pragma test.db")) // space on purpose
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	var busy int
+	if err := st.db.QueryRow(`PRAGMA busy_timeout`).Scan(&busy); err != nil {
+		t.Fatal(err)
+	}
+	if busy != 5000 {
+		t.Fatalf("busy_timeout = %d, want 5000 — a concurrent writer would fail instantly", busy)
+	}
+
+	var mode string
+	if err := st.db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(mode, "wal") {
+		t.Fatalf("journal_mode = %q, want wal", mode)
 	}
 }

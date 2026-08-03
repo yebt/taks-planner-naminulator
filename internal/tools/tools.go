@@ -75,17 +75,38 @@ func (r *Registry) logActivity(ctx context.Context, taskID int64, kind, note str
 func (r *Registry) memEnabled() bool { return r.mem != nil && r.mem.Available() }
 
 // pushSync best-effort pushes a task to Plane (local-first: sync errors don't
-// fail the local operation; the returned work_item reflects success).
-func (r *Registry) pushSync(ctx context.Context, t *domain.Task) {
-	if r.sync != nil && r.sync.Configured() {
-		_ = r.sync.Push(ctx, t)
+// fail the local operation; the returned work_item reflects success). The push
+// error is returned rather than discarded so the caller can report it: a silent
+// failure would let an expired token drop every task without any signal.
+func (r *Registry) pushSync(ctx context.Context, t *domain.Task) error {
+	if r.sync == nil || !r.sync.Configured() {
+		return nil
 	}
+	return r.sync.Push(ctx, t)
 }
 
-// Definitions returns the provider-agnostic tool schemas.
-func (r *Registry) Definitions() []llm.Tool {
-	defs := []llm.Tool{
-		{
+// toolDef is one tool: the schema advertised to the model, the condition under
+// which it is advertised, and the handler that executes it. The tool's identity
+// is Def.Name — there is deliberately no second Name field, because two copies
+// of the name would be one more thing to keep in sync by hand.
+type toolDef struct {
+	// Def is the provider-agnostic schema sent to the LLM.
+	Def llm.Tool
+	// Enabled gates whether the tool is advertised. nil means always advertised.
+	// It gates Definitions only: Dispatch stays reachable for every tool, as it
+	// has always been — the handlers that need a backend check it themselves.
+	Enabled func(*Registry) bool
+	// Handler executes the call. Never nil; TestToolTableIsWellFormed enforces it.
+	Handler func(*Registry, context.Context, string) (string, error)
+}
+
+// toolTable is the single source of truth for the tool set. Both Definitions
+// (what the model is told exists) and Dispatch (what actually runs) are derived
+// from it, so a tool cannot be advertised without a handler, nor carry a handler
+// that is never advertised. Adding a tool means adding one entry here.
+var toolTable = []toolDef{
+	{
+		Def: llm.Tool{
 			Name:        "create_task",
 			Description: "Create a new task in the local planner. Use when the user starts or mentions new work.",
 			Parameters: obj(props{
@@ -99,14 +120,20 @@ func (r *Registry) Definitions() []llm.Tool {
 				"project":     strProp("Linked project slug when the task belongs to a mentioned +project"),
 			}, "type", "title"),
 		},
-		{
+		Handler: (*Registry).createTask,
+	},
+	{
+		Def: llm.Tool{
 			Name:        "list_tasks",
 			Description: "List local tasks, optionally filtered by status.",
 			Parameters: obj(props{
 				"status": enumProp("Optional status filter", statuses()...),
 			}),
 		},
-		{
+		Handler: (*Registry).listTasks,
+	},
+	{
+		Def: llm.Tool{
 			Name:        "set_status",
 			Description: "Move a task between Plane's 5 state groups (backlog, unstarted, started, completed, cancelled).",
 			Parameters: obj(props{
@@ -114,7 +141,10 @@ func (r *Registry) Definitions() []llm.Tool {
 				"status": enumProp("New status — one of Plane's 5 state groups", statuses()...),
 			}, "id", "status"),
 		},
-		{
+		Handler: (*Registry).setStatus,
+	},
+	{
+		Def: llm.Tool{
 			Name:        "set_state",
 			Description: "Set the concrete Plane state name for a task (e.g. 'In Progress', 'Devuelto por Calidad') within its group.",
 			Parameters: obj(props{
@@ -122,7 +152,10 @@ func (r *Registry) Definitions() []llm.Tool {
 				"state": strProp("Plane state name, e.g. 'In Progress'"),
 			}, "id", "state"),
 		},
-		{
+		Handler: (*Registry).setState,
+	},
+	{
+		Def: llm.Tool{
 			Name:        "set_details",
 			Description: "Enrich a task with activity-template fields. Only the fields you pass are updated.",
 			Parameters: obj(props{
@@ -139,166 +172,218 @@ func (r *Registry) Definitions() []llm.Tool {
 				"due_date":            strProp("Plane due date (target date), YYYY-MM-DD"),
 			}, "id"),
 		},
-		{
+		Handler: (*Registry).setDetails,
+	},
+	{
+		Def: llm.Tool{
 			Name:        "drop_task",
 			Description: "Delete a task from the planner permanently.",
 			Parameters:  obj(props{"id": intProp("Task id")}, "id"),
 		},
+		Handler: (*Registry).dropTask,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "recall_memory",
+			Description: "Search long-term memory for relevant past notes, decisions, or context.",
+			Parameters: obj(props{
+				"query": strProp("What to search for"),
+				"limit": intProp("Max results (default 5)"),
+			}, "query"),
+		},
+		Enabled: (*Registry).memEnabled,
+		Handler: (*Registry).recallMemory,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "remember_note",
+			Description: "Save an important fact or decision to long-term memory for later recall.",
+			Parameters: obj(props{
+				"title":   strProp("Short title"),
+				"content": strProp("The note to remember"),
+			}, "title", "content"),
+		},
+		Enabled: (*Registry).memEnabled,
+		Handler: (*Registry).rememberNote,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "upsert_project",
+			Description: "Create or update a project (referenced as +slug). Pass only the fields you want to set.",
+			Parameters: obj(props{
+				"slug":        strProp("Project slug (the +slug identifier)"),
+				"name":        strProp("Human name"),
+				"description": strProp("Short summary: stack, purpose, constraints"),
+			}, "slug"),
+		},
+		Enabled: (*Registry).ctxEnabled,
+		Handler: (*Registry).upsertProject,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "add_project_note",
+			Description: "Append context to a project: info, a decision made, or a change that happened.",
+			Parameters: obj(props{
+				"slug": strProp("Project slug"),
+				"kind": enumProp("Note kind", "info", "decision", "change"),
+				"text": strProp("The note"),
+			}, "slug", "text"),
+		},
+		Enabled: (*Registry).ctxEnabled,
+		Handler: (*Registry).addProjectNote,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "upsert_person",
+			Description: "Create or update a person (referenced as @nick). Pass only the fields you want to set.",
+			Parameters: obj(props{
+				"nick": strProp("Person nick (the @nick identifier)"),
+				"name": strProp("Full name"),
+				"role": strProp("Area / role, e.g. 'área comercial'"),
+			}, "nick"),
+		},
+		Enabled: (*Registry).ctxEnabled,
+		Handler: (*Registry).upsertPerson,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "add_person_note",
+			Description: "Append context about a person: info, a decision, or a change.",
+			Parameters: obj(props{
+				"nick": strProp("Person nick"),
+				"kind": enumProp("Note kind", "info", "decision", "change"),
+				"text": strProp("The note"),
+			}, "nick", "text"),
+		},
+		Enabled: (*Registry).ctxEnabled,
+		Handler: (*Registry).addPersonNote,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "list_day_tasks",
+			Description: "List the tasks worked on a given day (material to write a daily). Call once per day when combining several.",
+			Parameters: obj(props{
+				"day": strProp("today | yesterday | hoy | ayer | YYYY-MM-DD (default today)"),
+			}),
+		},
+		Enabled: (*Registry).dailiesEnabled,
+		Handler: (*Registry).listDayTasks,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "save_daily",
+			Description: "Store the daily digest you wrote for a date (creates or overwrites it).",
+			Parameters: obj(props{
+				"date":    strProp("today | yesterday | YYYY-MM-DD"),
+				"content": strProp("The full daily text you composed"),
+			}, "date", "content"),
+		},
+		Enabled: (*Registry).dailiesEnabled,
+		Handler: (*Registry).saveDaily,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "get_daily",
+			Description: "Read back the stored daily for a date (to show or edit it).",
+			Parameters:  obj(props{"date": strProp("today | yesterday | YYYY-MM-DD")}, "date"),
+		},
+		Enabled: (*Registry).dailiesEnabled,
+		Handler: (*Registry).getDaily,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "list_dailies",
+			Description: "List the stored daily digests, most recent first, with a short preview of each. Use get_daily to read one in full.",
+			Parameters: obj(props{
+				"limit": intProp("Max dailies to return, most recent first (default 30)"),
+			}),
+		},
+		Enabled: (*Registry).dailiesEnabled,
+		Handler: (*Registry).listDailies,
+	},
+	{
+		Def: llm.Tool{
+			Name:        "send_daily",
+			Description: "Send the stored daily for a date to Telegram. Only when the user asks.",
+			Parameters:  obj(props{"date": strProp("today | yesterday | YYYY-MM-DD")}, "date"),
+		},
+		// Requires Telegram too, not just a daily store: advertising a delivery
+		// the system already knows it cannot make leads the model to promise it
+		// and then fail. The memory tools are gated the same way.
+		Enabled: func(r *Registry) bool {
+			return r.dailiesEnabled() && r.tg != nil && r.tg.Configured()
+		},
+		Handler: (*Registry).sendDaily,
+	},
+}
+
+// toolsByName indexes toolTable for dispatch. Derived from the same table the
+// definitions come from, so the two lists cannot drift apart.
+var toolsByName = indexTools(toolTable)
+
+func indexTools(table []toolDef) map[string]*toolDef {
+	m := make(map[string]*toolDef, len(table))
+	for i := range table {
+		m[table[i].Def.Name] = &table[i]
 	}
-	if r.memEnabled() {
-		defs = append(defs,
-			llm.Tool{
-				Name:        "recall_memory",
-				Description: "Search long-term memory for relevant past notes, decisions, or context.",
-				Parameters: obj(props{
-					"query": strProp("What to search for"),
-					"limit": intProp("Max results (default 5)"),
-				}, "query"),
-			},
-			llm.Tool{
-				Name:        "remember_note",
-				Description: "Save an important fact or decision to long-term memory for later recall.",
-				Parameters: obj(props{
-					"title":   strProp("Short title"),
-					"content": strProp("The note to remember"),
-				}, "title", "content"),
-			},
-		)
-	}
-	if r.ctxEnabled() {
-		defs = append(defs,
-			llm.Tool{
-				Name:        "upsert_project",
-				Description: "Create or update a project (referenced as +slug). Pass only the fields you want to set.",
-				Parameters: obj(props{
-					"slug":        strProp("Project slug (the +slug identifier)"),
-					"name":        strProp("Human name"),
-					"description": strProp("Short summary: stack, purpose, constraints"),
-				}, "slug"),
-			},
-			llm.Tool{
-				Name:        "add_project_note",
-				Description: "Append context to a project: info, a decision made, or a change that happened.",
-				Parameters: obj(props{
-					"slug": strProp("Project slug"),
-					"kind": enumProp("Note kind", "info", "decision", "change"),
-					"text": strProp("The note"),
-				}, "slug", "text"),
-			},
-			llm.Tool{
-				Name:        "upsert_person",
-				Description: "Create or update a person (referenced as @nick). Pass only the fields you want to set.",
-				Parameters: obj(props{
-					"nick": strProp("Person nick (the @nick identifier)"),
-					"name": strProp("Full name"),
-					"role": strProp("Area / role, e.g. 'área comercial'"),
-				}, "nick"),
-			},
-			llm.Tool{
-				Name:        "add_person_note",
-				Description: "Append context about a person: info, a decision, or a change.",
-				Parameters: obj(props{
-					"nick": strProp("Person nick"),
-					"kind": enumProp("Note kind", "info", "decision", "change"),
-					"text": strProp("The note"),
-				}, "nick", "text"),
-			},
-		)
-	}
-	if r.dailiesEnabled() {
-		defs = append(defs,
-			llm.Tool{
-				Name:        "list_day_tasks",
-				Description: "List the tasks worked on a given day (material to write a daily). Call once per day when combining several.",
-				Parameters: obj(props{
-					"day": strProp("today | yesterday | hoy | ayer | YYYY-MM-DD (default today)"),
-				}),
-			},
-			llm.Tool{
-				Name:        "save_daily",
-				Description: "Store the daily digest you wrote for a date (creates or overwrites it).",
-				Parameters: obj(props{
-					"date":    strProp("today | yesterday | YYYY-MM-DD"),
-					"content": strProp("The full daily text you composed"),
-				}, "date", "content"),
-			},
-			llm.Tool{
-				Name:        "get_daily",
-				Description: "Read back the stored daily for a date (to show or edit it).",
-				Parameters:  obj(props{"date": strProp("today | yesterday | YYYY-MM-DD")}, "date"),
-			},
-			llm.Tool{
-				Name:        "send_daily",
-				Description: "Send the stored daily for a date to Telegram. Only when the user asks.",
-				Parameters:  obj(props{"date": strProp("today | yesterday | YYYY-MM-DD")}, "date"),
-			},
-		)
+	return m
+}
+
+// Definitions returns the provider-agnostic tool schemas, keeping only the tools
+// whose backend is wired up.
+func (r *Registry) Definitions() []llm.Tool {
+	defs := make([]llm.Tool, 0, len(toolTable))
+	for _, t := range toolTable {
+		if t.Enabled != nil && !t.Enabled(r) {
+			continue
+		}
+		defs = append(defs, t.Def)
 	}
 	return defs
 }
 
 // Dispatch runs a tool by name with raw JSON arguments and returns a JSON result.
 func (r *Registry) Dispatch(ctx context.Context, name, args string) (string, error) {
-	switch name {
-	case "create_task":
-		return r.createTask(ctx, args)
-	case "list_tasks":
-		return r.listTasks(ctx, args)
-	case "set_status":
-		return r.setStatus(ctx, args)
-	case "set_state":
-		return r.setState(ctx, args)
-	case "set_details":
-		return r.setDetails(ctx, args)
-	case "drop_task":
-		return r.dropTask(ctx, args)
-	case "recall_memory":
-		return r.recallMemory(ctx, args)
-	case "remember_note":
-		return r.rememberNote(ctx, args)
-	case "upsert_project":
-		return r.upsertProject(ctx, args)
-	case "add_project_note":
-		return r.addProjectNote(ctx, args)
-	case "upsert_person":
-		return r.upsertPerson(ctx, args)
-	case "add_person_note":
-		return r.addPersonNote(ctx, args)
-	case "list_day_tasks":
-		return r.listDayTasks(ctx, args)
-	case "save_daily":
-		return r.saveDaily(ctx, args)
-	case "get_daily":
-		return r.getDaily(ctx, args)
-	case "send_daily":
-		return r.sendDaily(ctx, args)
-	default:
+	t, ok := toolsByName[name]
+	if !ok {
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
+	return t.Handler(r, ctx, args)
 }
 
-// dayFrom resolves today/yesterday (es/en) or an explicit YYYY-MM-DD.
-func dayFrom(s string) time.Time {
-	switch strings.ToLower(strings.TrimSpace(s)) {
+// dayFrom resolves today/yesterday (es/en) or an explicit YYYY-MM-DD. An empty
+// argument means today (the no-arg default); anything else that doesn't parse is
+// an error so the agent loop sees it instead of silently getting today.
+// Explicit dates are parsed in the local zone: the store derives its day window
+// from day.Location(), so a UTC date and a local time.Now() would otherwise
+// cover different hours for the same calendar day.
+func dayFrom(s string) (time.Time, error) {
+	tok := strings.TrimSpace(s)
+	switch strings.ToLower(tok) {
 	case "", "today", "hoy":
-		return time.Now()
+		return time.Now(), nil
 	case "yesterday", "ayer":
-		return time.Now().AddDate(0, 0, -1)
+		return time.Now().AddDate(0, 0, -1), nil
 	}
-	if t, err := time.Parse("2006-01-02", strings.TrimSpace(s)); err == nil {
-		return t
+	t, err := time.ParseInLocation("2006-01-02", tok, time.Local)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("date must be today | yesterday | YYYY-MM-DD, got %q", s)
 	}
-	return time.Now()
+	return t, nil
 }
 
 func (r *Registry) listDayTasks(ctx context.Context, args string) (string, error) {
 	var in struct {
 		Day string `json:"day"`
 	}
-	_ = json.Unmarshal([]byte(orEmptyObj(args)), &in)
-	day := dayFrom(in.Day)
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("list_day_tasks: bad args: %w", err)
+	}
+	day, err := dayFrom(in.Day)
+	if err != nil {
+		return "", fmt.Errorf("list_day_tasks: %w", err)
+	}
 	var tasks []domain.Task
-	var err error
 	if r.activity != nil {
 		tasks, err = r.activity.TasksWithActivityOn(ctx, day)
 	} else {
@@ -315,6 +400,9 @@ func (r *Registry) listDayTasks(ctx context.Context, args string) (string, error
 }
 
 func (r *Registry) saveDaily(ctx context.Context, args string) (string, error) {
+	if !r.dailiesEnabled() {
+		return "", fmt.Errorf("save_daily: no daily store configured")
+	}
 	var in struct{ Date, Content string }
 	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
 		return "", fmt.Errorf("save_daily: bad args: %w", err)
@@ -322,7 +410,11 @@ func (r *Registry) saveDaily(ctx context.Context, args string) (string, error) {
 	if strings.TrimSpace(in.Content) == "" {
 		return "", fmt.Errorf("save_daily: content is required")
 	}
-	key := dayFrom(in.Date).Format("2006-01-02")
+	day, err := dayFrom(in.Date)
+	if err != nil {
+		return "", fmt.Errorf("save_daily: %w", err)
+	}
+	key := day.Format("2006-01-02")
 	if err := r.dailies.SaveDaily(ctx, key, in.Content); err != nil {
 		return "", err
 	}
@@ -330,9 +422,18 @@ func (r *Registry) saveDaily(ctx context.Context, args string) (string, error) {
 }
 
 func (r *Registry) getDaily(ctx context.Context, args string) (string, error) {
+	if !r.dailiesEnabled() {
+		return "", fmt.Errorf("get_daily: no daily store configured")
+	}
 	var in struct{ Date string }
-	_ = json.Unmarshal([]byte(orEmptyObj(args)), &in)
-	key := dayFrom(in.Date).Format("2006-01-02")
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("get_daily: bad args: %w", err)
+	}
+	day, err := dayFrom(in.Date)
+	if err != nil {
+		return "", fmt.Errorf("get_daily: %w", err)
+	}
+	key := day.Format("2006-01-02")
 	d, err := r.dailies.GetDaily(ctx, key)
 	if err != nil {
 		return "", err
@@ -340,13 +441,67 @@ func (r *Registry) getDaily(ctx context.Context, args string) (string, error) {
 	return marshal(map[string]any{"date": key, "content": d.Content})
 }
 
+// defaultDailyListLimit caps how many digests list_dailies returns when the
+// model doesn't ask for a number: enough to cover more than a working month,
+// small enough that a year of stored dailies can't flood the context window.
+const defaultDailyListLimit = 30
+
+// dailyPreviewChars is how much of a digest the listing shows. A daily is a
+// multi-paragraph narrative; the list is for picking one, not for reading it.
+const dailyPreviewChars = 120
+
+func (r *Registry) listDailies(ctx context.Context, args string) (string, error) {
+	if !r.dailiesEnabled() {
+		return "", fmt.Errorf("list_dailies: no daily store configured")
+	}
+	var in struct {
+		Limit int `json:"limit"`
+	}
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("list_dailies: bad args: %w", err)
+	}
+	if in.Limit < 0 {
+		return "", fmt.Errorf("list_dailies: limit must be >= 0, got %d", in.Limit)
+	}
+	ds, err := r.dailies.ListDailies(ctx)
+	if err != nil {
+		return "", err
+	}
+	limit := in.Limit
+	if limit == 0 {
+		limit = defaultDailyListLimit
+	}
+	// ListDailies is ordered most recent first, so the head is the newest window.
+	if len(ds) > limit {
+		ds = ds[:limit]
+	}
+	views := make([]dailyView, 0, len(ds))
+	for _, d := range ds {
+		v := dailyView{Date: d.Date, Preview: preview(d.Content, dailyPreviewChars)}
+		if !d.UpdatedAt.IsZero() {
+			v.UpdatedAt = d.UpdatedAt.Local().Format(time.RFC3339)
+		}
+		views = append(views, v)
+	}
+	return marshal(views)
+}
+
 func (r *Registry) sendDaily(ctx context.Context, args string) (string, error) {
+	if !r.dailiesEnabled() {
+		return "", fmt.Errorf("send_daily: no daily store configured")
+	}
 	if r.tg == nil || !r.tg.Configured() {
 		return "", fmt.Errorf("send_daily: Telegram not configured")
 	}
 	var in struct{ Date string }
-	_ = json.Unmarshal([]byte(orEmptyObj(args)), &in)
-	key := dayFrom(in.Date).Format("2006-01-02")
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("send_daily: bad args: %w", err)
+	}
+	day, err := dayFrom(in.Date)
+	if err != nil {
+		return "", fmt.Errorf("send_daily: %w", err)
+	}
+	key := day.Format("2006-01-02")
 	d, err := r.dailies.GetDaily(ctx, key)
 	if err != nil {
 		return "", fmt.Errorf("send_daily: no daily for %s", key)
@@ -358,6 +513,9 @@ func (r *Registry) sendDaily(ctx context.Context, args string) (string, error) {
 }
 
 func (r *Registry) upsertProject(ctx context.Context, args string) (string, error) {
+	if !r.ctxEnabled() {
+		return "", fmt.Errorf("upsert_project: no context store configured")
+	}
 	var in struct{ Slug, Name, Description string }
 	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
 		return "", fmt.Errorf("upsert_project: bad args: %w", err)
@@ -373,6 +531,9 @@ func (r *Registry) upsertProject(ctx context.Context, args string) (string, erro
 }
 
 func (r *Registry) addProjectNote(ctx context.Context, args string) (string, error) {
+	if !r.ctxEnabled() {
+		return "", fmt.Errorf("add_project_note: no context store configured")
+	}
 	var in struct{ Slug, Kind, Text string }
 	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
 		return "", fmt.Errorf("add_project_note: bad args: %w", err)
@@ -387,6 +548,9 @@ func (r *Registry) addProjectNote(ctx context.Context, args string) (string, err
 }
 
 func (r *Registry) upsertPerson(ctx context.Context, args string) (string, error) {
+	if !r.ctxEnabled() {
+		return "", fmt.Errorf("upsert_person: no context store configured")
+	}
 	var in struct{ Nick, Name, Role string }
 	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
 		return "", fmt.Errorf("upsert_person: bad args: %w", err)
@@ -402,6 +566,9 @@ func (r *Registry) upsertPerson(ctx context.Context, args string) (string, error
 }
 
 func (r *Registry) addPersonNote(ctx context.Context, args string) (string, error) {
+	if !r.ctxEnabled() {
+		return "", fmt.Errorf("add_person_note: no context store configured")
+	}
 	var in struct{ Nick, Kind, Text string }
 	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
 		return "", fmt.Errorf("add_person_note: bad args: %w", err)
@@ -510,16 +677,18 @@ func (r *Registry) createTask(ctx context.Context, args string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	r.pushSync(ctx, &t)
+	syncErr := r.pushSync(ctx, &t)
 	r.logActivity(ctx, t.ID, "create", "created "+t.Label)
-	return marshal(view(t))
+	return marshal(syncedView(t, syncErr))
 }
 
 func (r *Registry) listTasks(ctx context.Context, args string) (string, error) {
 	var in struct {
 		Status string `json:"status"`
 	}
-	_ = json.Unmarshal([]byte(orEmptyObj(args)), &in)
+	if err := json.Unmarshal([]byte(orEmptyObj(args)), &in); err != nil {
+		return "", fmt.Errorf("list_tasks: bad args: %w", err)
+	}
 	tasks, err := r.store.List(ctx, store.Filter{Status: domain.Status(in.Status)})
 	if err != nil {
 		return "", err
@@ -551,9 +720,9 @@ func (r *Registry) setStatus(ctx context.Context, args string) (string, error) {
 	if err := r.store.Update(ctx, t); err != nil {
 		return "", err
 	}
-	r.pushSync(ctx, &t)
+	syncErr := r.pushSync(ctx, &t)
 	r.logActivity(ctx, t.ID, "status", "→ "+string(status))
-	return marshal(view(t))
+	return marshal(syncedView(t, syncErr))
 }
 
 func (r *Registry) setState(ctx context.Context, args string) (string, error) {
@@ -572,9 +741,9 @@ func (r *Registry) setState(ctx context.Context, args string) (string, error) {
 	if err := r.store.Update(ctx, t); err != nil {
 		return "", err
 	}
-	r.pushSync(ctx, &t)
+	syncErr := r.pushSync(ctx, &t)
 	r.logActivity(ctx, t.ID, "state", "state: "+in.State)
-	return marshal(view(t))
+	return marshal(syncedView(t, syncErr))
 }
 
 func (r *Registry) setDetails(ctx context.Context, args string) (string, error) {
@@ -638,9 +807,9 @@ func (r *Registry) setDetails(ctx context.Context, args string) (string, error) 
 	if err := r.store.Update(ctx, t); err != nil {
 		return "", err
 	}
-	r.pushSync(ctx, &t)
+	syncErr := r.pushSync(ctx, &t)
 	r.logActivity(ctx, t.ID, "details", "details updated")
-	return marshal(view(t))
+	return marshal(syncedView(t, syncErr))
 }
 
 func (r *Registry) dropTask(ctx context.Context, args string) (string, error) {
@@ -675,6 +844,30 @@ type taskView struct {
 	StartDate string `json:"start_date,omitempty"`
 	DueDate   string `json:"due_date,omitempty"`
 	Project   string `json:"project,omitempty"`
+	// SyncError carries why the Plane push failed. Empty (and omitted) when the
+	// push succeeded or Plane isn't configured, so the happy path is unchanged.
+	SyncError string `json:"sync_error,omitempty"`
+}
+
+// dailyView is a stored daily as it appears in a listing: its identity plus a
+// short preview. The full body is deliberately left out — digests are long and
+// the model reads one back with get_daily once it knows which date it wants.
+type dailyView struct {
+	Date      string `json:"date"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	Preview   string `json:"preview,omitempty"`
+}
+
+// preview flattens a digest to one line and clips it to max runes, so a list of
+// dailies stays a list and not their full text. Runes, not bytes: cutting a
+// multi-byte character in half would emit invalid UTF-8.
+func preview(s string, max int) string {
+	flat := strings.Join(strings.Fields(s), " ")
+	rs := []rune(flat)
+	if len(rs) <= max {
+		return flat
+	}
+	return strings.TrimRight(string(rs[:max]), " ") + "…"
 }
 
 func view(t domain.Task) taskView {
@@ -683,6 +876,17 @@ func view(t domain.Task) taskView {
 		Status: string(t.Status), State: t.State, WorkItem: t.WorkItemID,
 		StartDate: t.StartDate, DueDate: t.DueDate, Project: t.Project,
 	}
+}
+
+// syncedView is the view of a task that was just mutated: the local write
+// succeeded, so this is never an error result, but a failed Plane push is
+// attached so the model can tell the user the task only landed locally.
+func syncedView(t domain.Task, syncErr error) taskView {
+	v := view(t)
+	if syncErr != nil {
+		v.SyncError = syncErr.Error()
+	}
+	return v
 }
 
 // validDate checks an optional YYYY-MM-DD date.

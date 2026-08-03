@@ -176,13 +176,51 @@ func Load(path string) (Config, error) {
 }
 
 // Save writes the config as indented JSON, creating the directory if needed.
+// The file holds provider API keys and the Plane/Telegram tokens in plaintext,
+// so the directory is 0700 and the file 0600. The payload is written to a temp
+// file in the same directory and renamed over the target, so a crash mid-write
+// can never truncate an existing config.
 func Save(path string, c Config) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	// MkdirAll leaves the mode of an already-existing directory untouched, so
+	// tighten a legacy 0755 dir best-effort; never fail an otherwise valid save.
+	_ = os.Chmod(dir, 0o700)
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	// Same directory as the target so the rename stays on one filesystem.
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			tmp.Close()
+			os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// Rename keeps the temp file's mode, so chmod here is what guarantees 0600
+	// even when the target already exists with looser permissions.
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	tmpName = "" // renamed: nothing left to clean up
+	return nil
 }

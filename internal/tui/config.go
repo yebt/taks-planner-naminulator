@@ -12,8 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/webcloster-dev/planner/internal/config"
-	"github.com/webcloster-dev/planner/internal/plane"
-	"github.com/webcloster-dev/planner/internal/telegram"
+	"github.com/webcloster-dev/planner/internal/wiring"
 )
 
 // planeGroups are Plane's five fixed state groups, in workflow order.
@@ -214,7 +213,7 @@ func (m *configModel) testTelegram() string {
 	if !T.Ready() {
 		return "fill bot token + chat id first"
 	}
-	cl := telegram.New(T.BotToken, T.ChatID, T.ThreadID)
+	cl := wiring.TelegramClient(*m.cfg)
 	if err := cl.Test(context.Background()); err != nil {
 		return "test failed: " + err.Error()
 	}
@@ -228,9 +227,7 @@ func (m *configModel) fetchStates() string {
 	if !P.Ready() {
 		return "fill base url / token / slug / project first"
 	}
-	cl := plane.New(plane.Config{
-		BaseURL: P.BaseURL, Token: P.APIToken, WorkspaceSlug: P.WorkspaceSlug, ProjectID: P.ProjectID,
-	})
+	cl := wiring.PlaneClient(*m.cfg)
 	states, err := cl.ListStates(context.Background())
 	if err != nil {
 		return "fetch failed: " + err.Error()

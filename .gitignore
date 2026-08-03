@@ -8,3 +8,6 @@
 # OS / editor
 .DS_Store
 .atl
+
+# local config (holds API keys and tokens in plaintext)
+config.json

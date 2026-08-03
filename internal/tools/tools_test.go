@@ -3,11 +3,13 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/webcloster-dev/planner/internal/domain"
 	"github.com/webcloster-dev/planner/internal/store"
 )
 
@@ -21,6 +23,20 @@ func (f *fakeTelegram) Send(_ context.Context, text string) error {
 	f.sent = text
 	return nil
 }
+
+// fakeSyncer stands in for Plane: it counts pushes and returns a fixed result.
+type fakeSyncer struct {
+	configured bool
+	err        error
+	pushes     int
+}
+
+func (f *fakeSyncer) Configured() bool { return f.configured }
+func (f *fakeSyncer) Push(_ context.Context, _ *domain.Task) error {
+	f.pushes++
+	return f.err
+}
+func (f *fakeSyncer) PullStates(_ context.Context) (int, error) { return 0, nil }
 
 func newReg(t *testing.T) *Registry {
 	t.Helper()
@@ -311,6 +327,214 @@ func TestDailyTools(t *testing.T) {
 	}
 }
 
+func TestListDailiesReturnsStoredDates(t *testing.T) {
+	ctx := context.Background()
+	r, _ := newDailyReg(t)
+
+	long := "Daily: 2026-07-06\n\nTrabajo:\n  + " + strings.Repeat("mucho texto ", 60)
+	for _, d := range []struct{ date, content string }{
+		{"2026-07-06", long},
+		{"2026-07-07", "Daily: 2026-07-07\n\nTrabajo:\n  + revisión de PRs"},
+	} {
+		if _, err := r.Dispatch(ctx, "save_daily", `{"date":"`+d.date+`","content":`+quote(d.content)+`}`); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, err := r.Dispatch(ctx, "list_dailies", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []dailyView
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("list_dailies is not a JSON array of dailies: %s (%v)", out, err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected the 2 stored dailies, got %d: %s", len(got), out)
+	}
+	// most recent first, mirroring what /dailies shows
+	if got[0].Date != "2026-07-07" || got[1].Date != "2026-07-06" {
+		t.Fatalf("dates missing or out of order: %s", out)
+	}
+	if !strings.Contains(got[1].Preview, "Daily: 2026-07-06") {
+		t.Fatalf("preview should open with the digest: %q", got[1].Preview)
+	}
+	// the listing is a summary: a long body must not come back whole
+	if len(([]rune)(got[1].Preview)) > dailyPreviewChars+1 {
+		t.Fatalf("preview not clipped: %d runes", len([]rune(got[1].Preview)))
+	}
+	if strings.Contains(out, "\\n") {
+		t.Fatalf("preview should be flattened to one line: %s", out)
+	}
+}
+
+func TestListDailiesHonoursLimit(t *testing.T) {
+	ctx := context.Background()
+	r, _ := newDailyReg(t)
+	for _, date := range []string{"2026-07-05", "2026-07-06", "2026-07-07"} {
+		if _, err := r.Dispatch(ctx, "save_daily", `{"date":"`+date+`","content":"x"}`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := r.Dispatch(ctx, "list_dailies", `{"limit":2}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []dailyView
+	_ = json.Unmarshal([]byte(out), &got)
+	if len(got) != 2 || got[0].Date != "2026-07-07" {
+		t.Fatalf("limit ignored or wrong window: %s", out)
+	}
+}
+
+func TestListDailiesRejectsBadArgs(t *testing.T) {
+	ctx := context.Background()
+	r, _ := newDailyReg(t)
+	if _, err := r.Dispatch(ctx, "save_daily", `{"date":"2026-07-07","content":"x"}`); err != nil {
+		t.Fatal(err)
+	}
+	// truncated payload: listing everything anyway would hide the model's error
+	if _, err := r.Dispatch(ctx, "list_dailies", "{not json"); err == nil {
+		t.Fatal("list_dailies: malformed arguments should error")
+	}
+	if _, err := r.Dispatch(ctx, "list_dailies", `{"limit":-1}`); err == nil {
+		t.Fatal("list_dailies: a negative limit should error")
+	}
+	// absent arguments stay the legitimate "list them all" default
+	for _, args := range []string{"", "{}"} {
+		if _, err := r.Dispatch(ctx, "list_dailies", args); err != nil {
+			t.Fatalf("list_dailies with args %q should work: %v", args, err)
+		}
+	}
+}
+
+func TestListDailiesIsGatedOnTheDailyStore(t *testing.T) {
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, name := range advertised(New(st)) {
+		if name == "list_dailies" {
+			t.Fatal("list_dailies advertised without a daily store")
+		}
+	}
+}
+
+// quote renders a Go string as a JSON string literal, so a multi-line daily can
+// be embedded in a handwritten arguments payload.
+func quote(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// newDailyReg builds a registry with activity, dailies and a configured
+// Telegram sender, so the day-scoped tools are all reachable.
+func newDailyReg(t *testing.T) (*Registry, *fakeTelegram) {
+	t.Helper()
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	r := New(st)
+	r.SetActivity(st)
+	r.SetDailies(st)
+	tg := &fakeTelegram{configured: true}
+	r.SetTelegram(tg)
+	return r, tg
+}
+
+// dayToolNames are the tools that accept optional arguments; a truncated or
+// otherwise malformed payload must never be silently defaulted away.
+var dayToolNames = []string{"send_daily", "get_daily", "list_day_tasks", "list_tasks"}
+
+func TestDispatchRejectsMalformedArgs(t *testing.T) {
+	ctx := context.Background()
+	r, tg := newDailyReg(t)
+	// a daily exists for today, so only the bad JSON can stop send_daily
+	if _, err := r.Dispatch(ctx, "save_daily", `{"content":"Daily de hoy"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range dayToolNames {
+		if _, err := r.Dispatch(ctx, name, "{not json"); err == nil {
+			t.Fatalf("%s: malformed arguments should error", name)
+		}
+	}
+	if tg.sent != "" {
+		t.Fatalf("malformed send_daily must not deliver anything, got %q", tg.sent)
+	}
+}
+
+func TestDispatchAcceptsEmptyArgs(t *testing.T) {
+	ctx := context.Background()
+	r, _ := newDailyReg(t)
+	if _, err := r.Dispatch(ctx, "save_daily", `{"content":"Daily de hoy"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range []string{"", "{}"} {
+		for _, name := range dayToolNames {
+			if _, err := r.Dispatch(ctx, name, args); err != nil {
+				t.Fatalf("%s with args %q should still work: %v", name, args, err)
+			}
+		}
+	}
+}
+
+func TestDayFromKeepsLocalDayWindow(t *testing.T) {
+	today, err := dayFrom("hoy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if today.Location() != time.Local {
+		t.Fatalf("hoy resolved outside the local zone: %s", today.Location())
+	}
+	// the store slices its window with day.Location(), so an explicit date must
+	// land in the same zone as "hoy" or the two cover different hours
+	explicit, err := dayFrom(today.Format("2006-01-02"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicit.Location() != time.Local {
+		t.Fatalf("explicit date resolved outside the local zone: %s", explicit.Location())
+	}
+	ty, tm, td := today.Date()
+	ey, em, ed := explicit.Date()
+	if ty != ey || tm != em || td != ed {
+		t.Fatalf("hoy and its explicit date disagree: %s vs %s", today, explicit)
+	}
+	start := time.Date(ty, tm, td, 0, 0, 0, 0, today.Location())
+	if got := time.Date(ey, em, ed, 0, 0, 0, 0, explicit.Location()); !got.Equal(start) {
+		t.Fatalf("day windows differ: %s vs %s", start, got)
+	}
+}
+
+func TestDayFromRejectsInvalidDate(t *testing.T) {
+	for _, in := range []string{"2026-13-45", "mañana-quizá", "32/01/2026"} {
+		if _, err := dayFrom(in); err == nil {
+			t.Fatalf("dayFrom(%q) should reject an invalid date", in)
+		}
+	}
+	// an absent date is the intentional "today" default, not an error
+	if _, err := dayFrom(""); err != nil {
+		t.Fatalf("empty date should default to today: %v", err)
+	}
+
+	ctx := context.Background()
+	r, _ := newDailyReg(t)
+	if _, err := r.Dispatch(ctx, "get_daily", `{"date":"2026-13-45"}`); err == nil {
+		t.Fatal("get_daily should reject an invalid date instead of reading today")
+	}
+	if _, err := r.Dispatch(ctx, "list_day_tasks", `{"day":"mañana-quizá"}`); err == nil {
+		t.Fatal("list_day_tasks should reject an invalid day instead of listing today")
+	}
+}
+
 func TestCreateInvalidType(t *testing.T) {
 	r := newReg(t)
 	if _, err := r.Dispatch(context.Background(), "create_task", `{"type":"nope","title":"x"}`); err == nil {
@@ -338,7 +562,376 @@ func TestDefinitionsShape(t *testing.T) {
 	}
 }
 
+// rawKeys decodes a tool result as a raw JSON object so a test can assert that
+// a key is absent, not merely empty.
+func rawKeys(t *testing.T, out string) map[string]json.RawMessage {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		t.Fatalf("result is not a JSON object: %s (%v)", out, err)
+	}
+	return m
+}
+
+// newSyncReg builds a registry wired to the given syncer.
+func newSyncReg(t *testing.T, s Syncer) *Registry {
+	t.Helper()
+	r := newReg(t)
+	r.SetSyncer(s)
+	return r
+}
+
+func TestPushFailureReportedButLocalWriteSucceeds(t *testing.T) {
+	ctx := context.Background()
+	sy := &fakeSyncer{configured: true, err: errors.New("plane: 401 unauthorized")}
+	r := newSyncReg(t, sy)
+
+	out, err := r.Dispatch(ctx, "create_task", `{"type":"feat","title":"Login Screen"}`)
+	if err != nil {
+		t.Fatalf("a failed Plane push must not fail create_task: %v", err)
+	}
+	if sy.pushes != 1 {
+		t.Fatalf("expected 1 push attempt, got %d", sy.pushes)
+	}
+	var created taskView
+	if err := json.Unmarshal([]byte(out), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == 0 {
+		t.Fatalf("task should still be created locally: %s", out)
+	}
+	if _, ok := rawKeys(t, out)["sync_error"]; !ok {
+		t.Fatalf("create_task result should carry sync_error: %s", out)
+	}
+	if !strings.Contains(created.SyncError, "401 unauthorized") {
+		t.Fatalf("sync_error should carry the reason, got %q", created.SyncError)
+	}
+	// the task is really in the store, not just in the response
+	if _, err := r.store.Get(ctx, created.ID); err != nil {
+		t.Fatalf("task not persisted after a failed push: %v", err)
+	}
+
+	// not create-only: a mutating tool reports the same way
+	statusOut, err := r.Dispatch(ctx, "set_status", `{"id":`+itoa(created.ID)+`,"status":"started"}`)
+	if err != nil {
+		t.Fatalf("a failed Plane push must not fail set_status: %v", err)
+	}
+	if _, ok := rawKeys(t, statusOut)["sync_error"]; !ok {
+		t.Fatalf("set_status result should carry sync_error: %s", statusOut)
+	}
+	var updated taskView
+	_ = json.Unmarshal([]byte(statusOut), &updated)
+	if updated.Status != "started" {
+		t.Fatalf("status should still be applied locally: %+v", updated)
+	}
+	if !strings.Contains(updated.SyncError, "401 unauthorized") {
+		t.Fatalf("sync_error should carry the reason, got %q", updated.SyncError)
+	}
+	tk, err := r.store.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(tk.Status) != "started" {
+		t.Fatalf("status not persisted after a failed push: %+v", tk)
+	}
+}
+
+func TestPushSuccessOmitsSyncError(t *testing.T) {
+	ctx := context.Background()
+	sy := &fakeSyncer{configured: true}
+	r := newSyncReg(t, sy)
+
+	out, err := r.Dispatch(ctx, "create_task", `{"type":"feat","title":"X"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sy.pushes != 1 {
+		t.Fatalf("expected 1 push attempt, got %d", sy.pushes)
+	}
+	if _, ok := rawKeys(t, out)["sync_error"]; ok {
+		t.Fatalf("a successful push must not add sync_error: %s", out)
+	}
+	var created taskView
+	_ = json.Unmarshal([]byte(out), &created)
+	statusOut, err := r.Dispatch(ctx, "set_status", `{"id":`+itoa(created.ID)+`,"status":"started"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rawKeys(t, statusOut)["sync_error"]; ok {
+		t.Fatalf("a successful push must not add sync_error: %s", statusOut)
+	}
+}
+
+func TestPlaneUnconfiguredNeverPushesNorReportsSyncError(t *testing.T) {
+	ctx := context.Background()
+	// an unconfigured syncer: Push must never be attempted
+	sy := &fakeSyncer{configured: false, err: errors.New("should not be called")}
+	r := newSyncReg(t, sy)
+
+	out, err := r.Dispatch(ctx, "create_task", `{"type":"feat","title":"X"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sy.pushes != 0 {
+		t.Fatalf("unconfigured Plane must not be pushed to, got %d pushes", sy.pushes)
+	}
+	if _, ok := rawKeys(t, out)["sync_error"]; ok {
+		t.Fatalf("unconfigured Plane must not add sync_error: %s", out)
+	}
+
+	// no syncer at all behaves the same way
+	plain := newReg(t)
+	plainOut, err := plain.Dispatch(ctx, "create_task", `{"type":"feat","title":"X"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rawKeys(t, plainOut)["sync_error"]; ok {
+		t.Fatalf("no syncer must not add sync_error: %s", plainOut)
+	}
+}
+
 func itoa(n int64) string {
 	b, _ := json.Marshal(n)
 	return string(b)
+}
+
+// --- registry table (M12) ---
+
+// fakeMemory is an available memory backend, enough to switch the memory tools on.
+type fakeMemory struct{ available bool }
+
+func (f *fakeMemory) Available() bool                           { return f.available }
+func (f *fakeMemory) Name() string                              { return "fake" }
+func (f *fakeMemory) Save(_ context.Context, _, _ string) error { return nil }
+func (f *fakeMemory) Recall(_ context.Context, _ string, _ int) (string, error) {
+	return "[]", nil
+}
+
+// baseToolNames are advertised by every registry, with no optional backend wired.
+var baseToolNames = []string{
+	"create_task", "list_tasks", "set_status", "set_state", "set_details", "drop_task",
+}
+
+var memToolNames = []string{"recall_memory", "remember_note"}
+
+var contextToolNames = []string{
+	"upsert_project", "add_project_note", "upsert_person", "add_person_note",
+}
+
+// send_daily is listed apart: it needs a configured Telegram sender on top of a
+// daily store, so the two sets are gated differently.
+var dailyToolNames = []string{"list_day_tasks", "save_daily", "get_daily", "list_dailies"}
+var telegramToolNames = []string{"send_daily"}
+
+// allToolNames is the full advertised set of a fully wired registry, written out
+// on purpose: adding or removing a tool has to be acknowledged here.
+var allToolNames = []string{
+	"create_task",
+	"list_tasks",
+	"set_status",
+	"set_state",
+	"set_details",
+	"drop_task",
+	"recall_memory",
+	"remember_note",
+	"upsert_project",
+	"add_project_note",
+	"upsert_person",
+	"add_person_note",
+	"list_day_tasks",
+	"save_daily",
+	"get_daily",
+	"list_dailies",
+	"send_daily",
+}
+
+// advertised returns the tool names a registry currently exposes to the model.
+func advertised(r *Registry) []string {
+	defs := r.Definitions()
+	names := make([]string, 0, len(defs))
+	for _, d := range defs {
+		names = append(names, d.Name)
+	}
+	return names
+}
+
+// wantNames compares an advertised set against an expected one, order included:
+// the order is what the model sees, so a silent reshuffle should be visible too.
+func wantNames(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("advertised %d tools, want %d\n got: %v\nwant: %v", len(got), len(want), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("advertised tools differ at %d: got %q, want %q\n got: %v\nwant: %v",
+				i, got[i], want[i], got, want)
+		}
+	}
+}
+
+// newFullReg wires every optional backend, so all tools are advertised.
+func newFullReg(t *testing.T) *Registry {
+	t.Helper()
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	r := New(st)
+	r.SetMemory(&fakeMemory{available: true})
+	r.SetActivity(st)
+	r.SetContext(st)
+	r.SetDailies(st)
+	r.SetTelegram(&fakeTelegram{configured: true})
+	return r
+}
+
+// TestToolTableIsWellFormed guards the invariant behind the single table: every
+// entry is a real, dispatchable tool.
+func TestToolTableIsWellFormed(t *testing.T) {
+	seen := map[string]bool{}
+	for i, td := range toolTable {
+		if strings.TrimSpace(td.Def.Name) == "" {
+			t.Fatalf("toolTable[%d] has an empty name", i)
+		}
+		if td.Handler == nil {
+			t.Fatalf("tool %q has no handler", td.Def.Name)
+		}
+		if seen[td.Def.Name] {
+			t.Fatalf("tool %q is declared twice", td.Def.Name)
+		}
+		seen[td.Def.Name] = true
+	}
+	if len(toolsByName) != len(toolTable) {
+		t.Fatalf("dispatch index has %d entries for %d tools", len(toolsByName), len(toolTable))
+	}
+}
+
+// TestFullRegistryAdvertisesExactly pins the advertised set of a fully wired
+// registry, so an accidental addition or removal has to be acknowledged.
+func TestFullRegistryAdvertisesExactly(t *testing.T) {
+	wantNames(t, advertised(newFullReg(t)), allToolNames)
+}
+
+// TestGatingHidesUnwiredTools checks each optional backend independently: a
+// missing backend must hide exactly its own tools and nothing else.
+func TestGatingHidesUnwiredTools(t *testing.T) {
+	tests := []struct {
+		name string
+		wire func(*Registry, *store.SQLite)
+		want []string
+	}{
+		{"bare", func(*Registry, *store.SQLite) {}, baseToolNames},
+		{
+			"memory only",
+			func(r *Registry, _ *store.SQLite) { r.SetMemory(&fakeMemory{available: true}) },
+			append(append([]string{}, baseToolNames...), memToolNames...),
+		},
+		{
+			"memory present but unavailable",
+			func(r *Registry, _ *store.SQLite) { r.SetMemory(&fakeMemory{available: false}) },
+			baseToolNames,
+		},
+		{
+			"context only",
+			func(r *Registry, st *store.SQLite) { r.SetContext(st) },
+			append(append([]string{}, baseToolNames...), contextToolNames...),
+		},
+		{
+			"dailies only",
+			func(r *Registry, st *store.SQLite) { r.SetDailies(st) },
+			append(append([]string{}, baseToolNames...), dailyToolNames...),
+		},
+		{
+			// Telegram configured but no daily store: nothing to send.
+			"telegram without dailies",
+			func(r *Registry, _ *store.SQLite) { r.SetTelegram(&fakeTelegram{configured: true}) },
+			baseToolNames,
+		},
+		{
+			// Wired but unconfigured must behave like absent — otherwise the model
+			// is handed a delivery it will offer and then fail.
+			"dailies with unconfigured telegram",
+			func(r *Registry, st *store.SQLite) {
+				r.SetDailies(st)
+				r.SetTelegram(&fakeTelegram{configured: false})
+			},
+			append(append([]string{}, baseToolNames...), dailyToolNames...),
+		},
+		{
+			// The positive case: only here is send_daily advertised. Without this
+			// the suite would also pass if send_daily disappeared entirely.
+			"dailies with configured telegram",
+			func(r *Registry, st *store.SQLite) {
+				r.SetDailies(st)
+				r.SetTelegram(&fakeTelegram{configured: true})
+			},
+			append(append(append([]string{}, baseToolNames...), dailyToolNames...), telegramToolNames...),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			r := New(st)
+			tc.wire(r, st)
+			wantNames(t, advertised(r), tc.want)
+		})
+	}
+}
+
+// TestEveryAdvertisedToolDispatches closes the loop the other way: nothing the
+// model is told about can come back as an unknown tool.
+func TestEveryAdvertisedToolDispatches(t *testing.T) {
+	ctx := context.Background()
+	r := newFullReg(t)
+	for _, name := range advertised(r) {
+		// deliberately malformed arguments: the handler may reject them, but the
+		// failure must never be "unknown tool"
+		_, err := r.Dispatch(ctx, name, "{not json")
+		if err != nil && strings.Contains(err.Error(), "unknown tool") {
+			t.Fatalf("advertised tool %q does not dispatch: %v", name, err)
+		}
+	}
+}
+
+// Dispatch is exported, and until now the registration gate was the ONLY thing
+// standing between a nil interface and a panic inside it. Registration gates
+// what the model is *told* exists; it does not gate what can be called. Every
+// handler that needs a backend must say so itself.
+//
+// Note the failure mode this guards: without the checks these calls do not fail,
+// they panic on a nil dereference and take the whole test binary with them.
+func TestDispatchGuardsMissingBackends(t *testing.T) {
+	r := newReg(t) // task store only: no dailies, no context store, no memory
+
+	tests := []struct {
+		tool string
+		args string
+	}{
+		{"save_daily", `{"date":"2026-07-30","content":"x"}`},
+		{"get_daily", `{"date":"2026-07-30"}`},
+		{"list_dailies", `{}`},
+		{"send_daily", `{"date":"2026-07-30"}`},
+		{"upsert_project", `{"slug":"liquida"}`},
+		{"add_project_note", `{"slug":"liquida","text":"x"}`},
+		{"upsert_person", `{"nick":"kari"}`},
+		{"add_person_note", `{"nick":"kari","text":"x"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.tool, func(t *testing.T) {
+			out, err := r.Dispatch(context.Background(), tt.tool, tt.args)
+			if err == nil {
+				t.Fatalf("%s with no backend should error, got %q", tt.tool, out)
+			}
+			if !strings.Contains(err.Error(), tt.tool) {
+				t.Fatalf("the error should name the tool, got: %v", err)
+			}
+		})
+	}
 }
