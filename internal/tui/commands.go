@@ -25,6 +25,7 @@ var baseCommands = []suggestion{
 	{"/model", "switch LLM provider"},
 	{"/fav", "/fav [save|del] <name> — save/switch a provider+model favorite"},
 	{"/key", "/key <provider> <apikey> — set & save an API key"},
+	{"/config", "open the configuration screen (providers, keys, plane, telegram)"},
 	{"/save", "save this conversation"},
 	{"/chats", "list saved conversations"},
 	{"/load", "/load <id> — restore a conversation"},
@@ -80,6 +81,9 @@ func (m *chatModel) runCommand(val string) tea.Cmd {
 	switch fields[0] {
 	case "/quit", "/exit", "/q":
 		return tea.Quit
+
+	case "/config":
+		m.openConfig()
 
 	case "/help":
 		var b strings.Builder

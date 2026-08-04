@@ -26,7 +26,7 @@ func TestComputeSuggestions(t *testing.T) {
 		{"/todo started ", []string{"/todo started hoy", "/todo started ayer"}},
 		{"/re", []string{"/recall", "/remember", "/resume"}},
 		{"/rem", []string{"/remember"}},
-		{"/c", []string{"/chats", "/clear"}},
+		{"/c", []string{"/config", "/chats", "/clear"}}, // menu order follows baseCommands
 		{"/model ", []string{"/model claude", "/model kimi", "/model ollama"}},
 		{"/model k", []string{"/model kimi"}},
 		{"/model kimi ", nil},      // provider chosen, nothing more to complete

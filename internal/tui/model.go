@@ -60,6 +60,7 @@ type chatModel struct {
 	quitArmed      bool            // first ctrl+c clears; second quits
 	confirm        *pendingConfirm // non-nil while awaiting y/n
 	statePick      *statePicker    // non-nil while picking a Plane state
+	config         *configModel    // non-nil while the configuration modal is open
 	dailyDraft     string          // last generated/edited daily digest
 	dailyDraftDate string          // YYYY-MM-DD the current draft belongs to
 	dailyEditing   bool            // true while editing the daily in the textarea
@@ -140,11 +141,31 @@ func sysEntry(s string) []entry  { return []entry{{role: "sys", text: s}} }
 func (m *chatModel) Init() tea.Cmd { return textarea.Blink }
 
 func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// The configuration modal takes the screen and the keyboard while it is
+	// open. Its own closing message is handled below rather than here, so the
+	// chat — not the config screen — decides what happens on the way back.
+	if m.config != nil {
+		if _, ok := msg.(configClosedMsg); !ok {
+			_, cmd := m.config.Update(msg)
+			if sz, ok := msg.(tea.WindowSizeMsg); ok {
+				// Keep the chat's own geometry current, or it would repaint at
+				// the old size the moment the modal closes.
+				m.width, m.height = sz.Width, sz.Height
+				m.layout()
+			}
+			return m, cmd
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.ready = true
 		m.layout()
+		return m, nil
+
+	case configClosedMsg:
+		m.closeConfig()
 		return m, nil
 
 	case replyMsg:

@@ -135,6 +135,11 @@ func (m *chatModel) View() string {
 	if !m.ready {
 		return "loading…"
 	}
+	// The configuration modal owns the whole screen while it is open; drawing
+	// the conversation underneath it would just be noise behind a form.
+	if m.config != nil {
+		return m.config.View()
+	}
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("planner"))
 	b.WriteString("\n")

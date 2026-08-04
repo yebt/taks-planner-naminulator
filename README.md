@@ -160,6 +160,12 @@ runs a dedicated prompt, so in conversation the agent composes the text itself.
 - `/model [name]` — switch the active provider
 - `/fav [save|del] <name>` — save / switch / remove a provider+model favorite
 - `/key <provider> <apikey>` — set and save an API key
+- `/config` — open the full configuration screen without leaving the chat
+
+`/config` opens the same screen as `planner config`, as a modal over the
+conversation: `q` returns to the chat, and the provider, Plane and Telegram
+adapters are rebuilt from whatever was saved. Nothing is lost — the conversation
+is still there behind it.
 
 **Conversations & memory**
 

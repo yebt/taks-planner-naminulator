@@ -46,15 +46,27 @@ type configModel struct {
 	status   string
 	width    int
 	height   int
+
+	// exit is what leaving this screen does. Standalone (`planner config`) that
+	// is tea.Quit; embedded in the chat it reports back instead, because
+	// quitting there would take the conversation down with it. It is a
+	// constructor argument rather than a field to set afterwards so it cannot be
+	// forgotten — a nil exit makes the screen inescapable.
+	exit tea.Cmd
 }
 
-// RunConfig opens the sectioned configuration TUI. It mutates cfg in place and
-// writes to path when the user presses 's'.
-func RunConfig(cfg *config.Config, path string) error {
+// newConfigModel builds the configuration screen. exit is the command issued
+// when the user leaves it; see the field's comment.
+func newConfigModel(cfg *config.Config, path string, exit tea.Cmd) *configModel {
 	ti := textinput.New()
 	ti.Prompt = "› "
-	m := &configModel{cfg: cfg, path: path, input: ti, section: -1}
-	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	return &configModel{cfg: cfg, path: path, input: ti, section: -1, exit: exit}
+}
+
+// RunConfig opens the sectioned configuration TUI as its own program. It mutates
+// cfg in place and writes to path when the user presses 's'.
+func RunConfig(cfg *config.Config, path string) error {
+	_, err := tea.NewProgram(newConfigModel(cfg, path, tea.Quit), tea.WithAltScreen()).Run()
 	return err
 }
 
@@ -323,7 +335,7 @@ func (m *configModel) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	secs := m.sections()
 	switch msg.String() {
 	case "q", "ctrl+c":
-		return m, tea.Quit
+		return m, m.exit
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -343,7 +355,7 @@ func (m *configModel) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *configModel) updateSection(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
-		return m, tea.Quit
+		return m, m.exit
 	case "esc":
 		if m.section == 0 && m.provider != "" { // back from provider detail to the list
 			m.provider = ""
