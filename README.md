@@ -213,16 +213,34 @@ internal/llm           Provider port + adapters (openai/moonshot/kimi/groq/claud
 internal/store         TaskStore/ConversationStore/DailyStore ports + SQLite adapter (pure Go)
 internal/tools         LLM tool set → deterministic ops on the store
 internal/agent         tool-use loop + stateless Oneshot (for dailies)
+internal/daily         the one owner of the digest format: prefixes, section
+                       titles, the prompt spec, and the deterministic fallback
 internal/contextmgr    trims the LLM window to a char budget
 internal/memory        Engram long-term memory (CLI shell-out) or no-op
 internal/plane         Plane REST client + push/pull syncer
-internal/telegram      Telegram Bot API client (daily delivery)
+internal/telegram      Telegram Bot API client (daily delivery) + 4096-char split
 internal/config        JSON config (providers, Plane, Telegram, favorites)
+internal/wiring        builds the Plane/Telegram adapters from config, so the
+                       entrypoint and the TUI stop duplicating that assembly
 internal/tui           Bubbletea chat harness + config TUI
 ```
 
 The core depends only on the ports, so swapping the LLM, storage, or delivery
 channel is an adapter change, not a rewrite.
+
+Two of these exist to kill a duplicate rather than to add a layer, which is worth
+saying out loud:
+
+- **`internal/daily`** — the digest format used to live in three places (the LLM
+  prompt, the deterministic fallback, and the renderer) and they had already
+  drifted apart. The prompt spec is now assembled by concatenating the very same
+  prefix constants the builder emits, so the format cannot fork again without a
+  compile error.
+- **`internal/wiring`** — a shared factory, *not* a purity fix. The config TUI
+  genuinely needs `Client.ListStates`, whose result type is `plane.State`, so
+  `internal/tui` still depends on `internal/plane` transitively through this
+  package. Mirror types would buy an import-graph cosmetic at the price of a
+  translation layer and a second type to keep in sync.
 
 ---
 
