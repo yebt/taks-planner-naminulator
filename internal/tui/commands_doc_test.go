@@ -39,14 +39,21 @@ func TestEveryCommandIsDocumented(t *testing.T) {
 }
 
 // mentionsCommand reports whether the README refers to cmd as a whole token.
+//
+// Both ends matter. Looking only at the character after the command lets any
+// path that happens to end in it — "internal/config", "~/.config" — pass as
+// documentation, which is how /config first shipped undocumented while this
+// test was green.
 func mentionsCommand(readme, cmd string) bool {
 	for i := 0; ; {
 		j := strings.Index(readme[i:], cmd)
 		if j < 0 {
 			return false
 		}
-		end := i + j + len(cmd)
-		if end >= len(readme) || !isCommandRune(readme[end]) {
+		start, end := i+j, i+j+len(cmd)
+		standsAlone := (start == 0 || !isCommandRune(readme[start-1])) &&
+			(end >= len(readme) || !isCommandRune(readme[end]))
+		if standsAlone {
 			return true
 		}
 		i = end
@@ -76,6 +83,12 @@ func TestMentionsCommandRequiresAWholeToken(t *testing.T) {
 		{"absent", "nothing here", "/task", false},
 		{"end of file counts as a boundary", "see /task", "/task", true},
 		{"found after a near-miss", "`/tasks` and also `/task <id>`", "/task", true},
+		// The guard originally only looked at the character AFTER the command,
+		// so the architecture map's "internal/config" silently satisfied
+		// "/config" and a genuinely undocumented command shipped green.
+		{"a package path does not document a command", "internal/config   JSON config", "/config", false},
+		{"a file path does not document a command", "see ~/.config/planner/state for /state", "/config", false},
+		{"real documentation after a path still counts", "internal/config\n- `/config` — open settings", "/config", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
