@@ -49,6 +49,14 @@ type IssueInput struct {
 	Priority    string   // urgent | high | medium | low | none; "" leaves it untouched
 	Labels      []string // label uuids to attach
 	Estimate    string   // estimate_point; "" leaves it untouched
+	Assignees   []string // user uuids; empty leaves Plane's own value untouched
+}
+
+// User is a Plane account. Only the fields we actually use are decoded.
+type User struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	Email       string `json:"email"`
 }
 
 // Label is a Plane issue label (tag).
@@ -76,6 +84,26 @@ func (c *Client) base() string {
 		strings.TrimRight(c.cfg.BaseURL, "/"), c.cfg.WorkspaceSlug, c.cfg.ProjectID)
 }
 
+// root is the API root. Most endpoints hang off base(), but the account ones are
+// workspace-independent, so they cannot reuse it.
+func (c *Client) root() string {
+	return strings.TrimRight(c.cfg.BaseURL, "/") + "/api/v1"
+}
+
+// Me returns the account the API key belongs to. This is the only way to learn
+// who "we" are: Plane fills created_by from the key on its own, but assignees
+// have to be sent explicitly, and that needs a user id.
+func (c *Client) Me(ctx context.Context) (User, error) {
+	var out User
+	if err := c.do(ctx, http.MethodGet, c.root()+"/users/me/", nil, &out); err != nil {
+		return User{}, err
+	}
+	if out.ID == "" {
+		return User{}, fmt.Errorf("plane: /users/me returned no id")
+	}
+	return out, nil
+}
+
 func (in IssueInput) body() map[string]any {
 	b := map[string]any{"name": in.Name}
 	switch {
@@ -101,6 +129,11 @@ func (in IssueInput) body() map[string]any {
 	}
 	if in.Estimate != "" {
 		b["estimate_point"] = in.Estimate
+	}
+	// Absent, never empty: sending "assignees": [] would clear whoever is
+	// assigned in Plane, which is exactly what an update must not do.
+	if len(in.Assignees) > 0 {
+		b["assignees"] = in.Assignees
 	}
 	return b
 }

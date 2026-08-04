@@ -22,6 +22,8 @@ type Syncer struct {
 	labels        []Label
 	loaded        bool
 	labelsLoaded  bool
+	ownerID       string // uuid of the API key's account; "" = unresolved
+	ownerLoaded   bool
 }
 
 // NewSyncer builds a syncer over a Plane client and the local store.
@@ -73,6 +75,30 @@ func (s *Syncer) labelIDForType(ctx context.Context, t domain.TaskType) string {
 		}
 	}
 	return ""
+}
+
+// ownerAssignee returns the API key owner's user id, resolved once per process
+// and cached.
+//
+// A work item created here belongs to whoever runs the planner, but Plane only
+// infers created_by from the key — assignees must be sent explicitly, so the id
+// has to be looked up. The lookup is deliberately best-effort: if it fails the
+// caller gets "", the work item is created unassigned, and the push still
+// succeeds. Losing the assignee is an annoyance; losing the work item is not.
+//
+// The failure is cached too. Retrying on every push would turn one unreachable
+// endpoint into an extra round-trip per task for the whole session.
+func (s *Syncer) ownerAssignee(ctx context.Context) []string {
+	if !s.ownerLoaded {
+		s.ownerLoaded = true
+		if me, err := s.client.Me(ctx); err == nil {
+			s.ownerID = me.ID
+		}
+	}
+	if s.ownerID == "" {
+		return nil
+	}
+	return []string{s.ownerID}
 }
 
 func (s *Syncer) stateNameByID(ctx context.Context, id string) string {
@@ -129,7 +155,12 @@ func (s *Syncer) Push(ctx context.Context, t *domain.Task) error {
 		return nil
 	}
 	if t.WorkItemID == "" {
-		ref, err := s.client.CreateIssue(ctx, s.issueInput(ctx, t))
+		// Assignees ride the create and only the create. issueInput is shared
+		// with the update path below, and re-sending them there would quietly
+		// revert a reassignment somebody made in Plane by hand.
+		in := s.issueInput(ctx, t)
+		in.Assignees = s.ownerAssignee(ctx)
+		ref, err := s.client.CreateIssue(ctx, in)
 		if err != nil {
 			return err
 		}
