@@ -29,17 +29,22 @@ func (m *chatModel) submit() (tea.Model, tea.Cmd) {
 	m.selected = 0
 
 	if strings.HasPrefix(val, "/") {
-		cmd := m.runCommand(val)
+		// Commands run against the real text: a /new whose title is a reference
+		// would create a task literally called "[Pasted text #1 …]".
+		cmd := m.runCommand(m.expandPastes(val))
 		m.layout()
 		return m, cmd
 	}
 
+	// The conversation keeps the reference — collapsing the paste and then
+	// echoing it in full would defeat the point — while the agent gets the real
+	// text, plus any +project/@person context so it drafts coherently. The
+	// mention scan runs on what was typed, not on the paste: a pasted log is
+	// content, not a set of mentions to go look up.
 	m.add("you", val)
-	// The user sees the clean message; the agent also gets any +project/@person
-	// context so it drafts coherently.
-	input := val
+	input := m.expandPastes(val)
 	if pre := m.buildMentionContext(context.Background(), val); pre != "" {
-		input = pre + "\n\n" + val
+		input = pre + "\n\n" + input
 	}
 	m.thinking = true
 	m.thinkStart = time.Now()
@@ -146,7 +151,7 @@ func (m *chatModel) historyPrev() {
 	}
 	if m.histPos > 0 {
 		m.histPos--
-		m.ta.SetValue(m.history[m.histPos])
+		m.setInputValue(m.history[m.histPos])
 	}
 	m.suggestions = nil
 	m.layout()
@@ -160,10 +165,10 @@ func (m *chatModel) historyNext() {
 	if m.histPos >= len(m.history) {
 		// Past the newest entry: back to whatever was being typed.
 		m.histPos = -1
-		m.ta.SetValue(m.histDraft)
+		m.setInputValue(m.histDraft)
 		m.histDraft = ""
 	} else {
-		m.ta.SetValue(m.history[m.histPos])
+		m.setInputValue(m.history[m.histPos])
 	}
 	m.suggestions = nil
 	m.layout()

@@ -184,7 +184,7 @@ func (m *chatModel) editDaily(ctx context.Context, day time.Time) {
 	}
 	m.dailyDraft = draft
 	m.dailyDraftDate = dateKey
-	m.ta.SetValue(draft)
+	m.setInputValue(draft)
 	m.dailyEditing = true
 	m.suggestions = nil
 	m.layout()

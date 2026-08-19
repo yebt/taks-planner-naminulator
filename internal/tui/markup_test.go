@@ -72,6 +72,44 @@ func TestDailyEntryIsWrappedToViewport(t *testing.T) {
 	}
 }
 
+// An agent reply is model-authored markup exactly like a daily is, and the model
+// writes **bold** and `code` whether or not we paint them. Before this, "planner"
+// text went to the screen raw, so a perfectly ordinary answer read as
+// "- **+sensei**" with the markers showing.
+func TestAgentReplyRendersWithoutMarkers(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.entries = nil
+
+	m.add("planner", "Tareas de hoy en `started`:\n\n- **+sensei**\n  - `fix-sidebar` (181): reparación.")
+
+	shown := strings.Join(m.contentLines, "\n")
+	for _, marker := range []string{"**", "`"} {
+		if strings.Contains(shown, marker) {
+			t.Fatalf("marker %q still visible in an agent reply:\n%s", marker, shown)
+		}
+	}
+	for _, want := range []string{"started", "+sensei", "fix-sidebar", "reparación."} {
+		if !strings.Contains(shown, want) {
+			t.Fatalf("content %q lost in rendering:\n%s", want, shown)
+		}
+	}
+}
+
+// What the agent said must stay recoverable verbatim: the painting happens on
+// the way to the screen, never in the stored entry, or /save would persist ANSI
+// escapes and a reloaded conversation would be unreadable.
+func TestAgentReplyIsStoredUnpainted(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.entries = nil
+
+	const raw = "avance en **DNS** y `deploy`"
+	m.add("planner", raw)
+
+	if got := m.entries[0].text; got != raw {
+		t.Fatalf("the stored entry was painted: %q, want %q", got, raw)
+	}
+}
+
 // No literal markers should reach the screen for a realistic daily.
 func TestDailyEntryRendersWithoutMarkers(t *testing.T) {
 	m, _ := newTestModel(t)

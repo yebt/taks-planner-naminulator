@@ -56,7 +56,11 @@ func (m *chatModel) setContent() {
 		case "you":
 			blocks = append(blocks, youLabel.Render("› you")+"\n"+bubble.Render(e.text))
 		case "planner":
-			blocks = append(blocks, botLabel.Render("planner")+"\n"+body.Render(e.text))
+			// Model-authored markup, same class as "daily" below: the model writes
+			// **bold** and `code` whether or not we paint them, so leaving it raw
+			// only means the markers reach the screen. Painted on the way out, never
+			// in the entry — /save must persist what the model said, not ANSI.
+			blocks = append(blocks, botLabel.Render("planner")+"\n"+body.Render(renderMarkup(e.text)))
 		case "cmd":
 			blocks = append(blocks, cmdBubble.Render(e.text))
 		case "tool":
@@ -65,8 +69,9 @@ func (m *chatModel) setContent() {
 			blocks = append(blocks, body.Inherit(errStyle).Render("error: "+e.text))
 		// The health-check messages point at commands and UI paths in backticks, so
 		// they carry markup too. These two roles only ever hold fixed startup
-		// strings, which is why rendering them is safe — do not widen this to roles
-		// that carry model or user text without deciding that deliberately.
+		// strings, which is why rendering them is safe. "you" and "cmd" stay raw
+		// deliberately: reinterpreting what the user typed would hide characters
+		// they meant literally.
 		case "alert":
 			blocks = append(blocks, body.Inherit(errStyle).Render("⚠ "+renderMarkup(e.text)))
 		case "warn":
@@ -109,20 +114,35 @@ func (m *chatModel) layout() {
 		return
 	}
 	m.ta.SetWidth(m.width - 1)
+	m.scratch.SetWidth(m.width - 1) // measured, never drawn — keep it in step
 	// Rows View() spends outside the viewport. Named so that adding or removing a
 	// row in View() has an obvious place to be accounted for, instead of a lone
 	// literal nobody connects to the layout.
 	const (
-		inputH   = 3 // fixed input height (dynamic growth was reverted earlier)
 		headerH  = 1
-		dividerH = 1
+		dividerH = 1 // the rule above the input, which doubles as the "↑ n more"
 		helpH    = 1
 		statusH  = 1
 		marginH  = 1
 		chromeH  = headerH + dividerH + helpH + statusH + marginH
 	)
+	// The input grows with what is in it, up to half the screen. Three fixed
+	// rows made a long message impossible to read back before sending; growing
+	// without a ceiling would eat the conversation being replied to instead.
+	maxInputH := m.height / 2
+	if maxInputH < minInputRows {
+		maxInputH = minInputRows
+	}
+	inputH := min(max(m.wantedRows(), minInputRows), maxInputH)
 	m.ta.SetHeight(inputH)
-	vpH := m.height - len(m.suggestions) - inputH - chromeH
+
+	// The "↓ n more" rule is an extra row and has to be paid for out of the
+	// viewport, unlike the one above the input which replaces the separator.
+	footRule := 0
+	if m.inputMetrics().below > 0 {
+		footRule = 1
+	}
+	vpH := m.height - len(m.suggestions) - inputH - footRule - chromeH
 	if vpH < 3 {
 		vpH = 3
 	}
@@ -145,15 +165,21 @@ func (m *chatModel) View() string {
 	b.WriteString("\n")
 	b.WriteString(m.vp.View())
 	b.WriteString("\n")
-	// Separator between the conversation and the input.
-	b.WriteString(dividerStyle.Render(strings.Repeat("─", m.width)))
+	// The separator between the conversation and the input doubles as the "there
+	// is more above" indicator, so saying so costs no screen space.
+	mt := m.inputMetrics()
+	b.WriteString(m.inputRule("↑", mt.above))
 	b.WriteString("\n")
 	if len(m.suggestions) > 0 {
 		b.WriteString(m.renderSuggestions())
 		b.WriteString("\n")
 	}
-	b.WriteString(lipgloss.NewStyle().Width(m.width).Render(m.ta.View()))
+	b.WriteString(lipgloss.NewStyle().Width(m.width).Render(paintPasteTokens(m.ta.View())))
 	b.WriteString("\n")
+	if mt.below > 0 {
+		b.WriteString(m.inputRule("↓", mt.below))
+		b.WriteString("\n")
+	}
 	b.WriteString(m.footer())
 	b.WriteString("\n")
 	b.WriteString(m.statusBar())

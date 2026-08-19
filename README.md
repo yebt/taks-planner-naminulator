@@ -106,6 +106,39 @@ selecting and the range is preserved beyond what's visible. It does not copy on
 release: **right-click** copies the highlighted text (with a confirmation toast),
 and any key (or `esc`) cancels it.
 
+### The input box
+
+The box grows with what you type, up to **half the screen**, and scrolls past
+that. When something is out of sight, the rules above and below say how much:
+
+```
+──  ↑ 16 more  ──────────────────────────────────────────
+│ …the twelve rows you can actually see…
+──  ↓ 3 more  ───────────────────────────────────────────
+```
+
+Wrapped lines count as rows, so a single long paragraph grows the box too.
+
+### Pasted text
+
+Pasting something **multi-line and over 100 characters** does not dump it into
+the prompt. It collapses to a coloured reference:
+
+```
+mirá este log [Pasted text #1 +16 lines] ¿qué ves?
+```
+
+The reference behaves as one object, not as the characters it's made of:
+
+- **one `backspace` deletes all of it** — there is no half-deleted reference
+- **it can't be typed into** — a keystroke aimed inside it lands after it
+- the agent receives the **real text**; the conversation keeps the reference, so
+  the transcript stays readable
+- numbers are never reused in a session, so `#2` always means the same paste
+
+A reference you typed by hand is just text: it has no paste behind it, and it is
+sent exactly as written rather than expanded into something invented.
+
 ### Commands
 
 **Tasks**

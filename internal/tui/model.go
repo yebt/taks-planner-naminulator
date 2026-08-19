@@ -44,8 +44,15 @@ type statePicker struct {
 }
 
 type chatModel struct {
-	deps           ChatDeps
-	ta             textarea.Model
+	deps ChatDeps
+	ta   textarea.Model
+	// scratch is a never-drawn twin of ta, used to measure how tall a line comes
+	// out once wrapped. See input.go for why the measuring is delegated.
+	scratch       textarea.Model
+	taOffset      int            // mirror of the textarea's own scroll offset, in visual rows
+	rowCache      map[string]int // measured wrapped height per logical line
+	rowCacheWidth int            // the width rowCache was measured at
+
 	vp             viewport.Model
 	width          int
 	height         int
@@ -64,10 +71,16 @@ type chatModel struct {
 	dailyDraft     string          // last generated/edited daily digest
 	dailyDraftDate string          // YYYY-MM-DD the current draft belongs to
 	dailyEditing   bool            // true while editing the daily in the textarea
-	history        []string        // submitted inputs, for ↑/↓ recall
-	histPos        int             // -1 = not navigating
-	histDraft      string          // what was being typed when history navigation began
-	convID         int64           // 0 = unsaved
+	// Bulk pastes, collapsed to a reference in the input (see paste.go).
+	// pasteSeq only ever grows, so a number the user has already seen never
+	// comes back later meaning something else.
+	pastes   []pasteBlock
+	pasteSeq int
+
+	history   []string // submitted inputs, for ↑/↓ recall
+	histPos   int      // -1 = not navigating
+	histDraft string   // what was being typed when history navigation began
+	convID    int64    // 0 = unsaved
 
 	// mouse selection: character-granular, anchored in content coords (line,col)
 	// so it survives scroll. Left-drag selects; right-click copies; esc cancels.

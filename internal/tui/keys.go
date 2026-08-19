@@ -99,6 +99,28 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// A bulk paste never reaches the textarea as text: it is registered and
+	// replaced by a reference, so the prompt stays readable. This sits after the
+	// daily editor on purpose — a daily is stored and delivered verbatim, so its
+	// text must be literal there.
+	if msg.Paste {
+		// Normalised before anything looks at it: the line endings a terminal
+		// sends are its own, not the clipboard's.
+		if txt := normalizePaste(string(msg.Runes)); isBulkPaste(txt) {
+			m.ta.InsertString(m.capturePaste(txt))
+			m.suggestions = nil
+			m.layout()
+			return m, nil
+		}
+	}
+
+	// A reference is one object: it cannot be typed into and it deletes whole.
+	if m.handlePasteKeys(msg) {
+		m.suggestions = nil
+		m.layout()
+		return m, nil
+	}
+
 	// Suggestion menu open: navigate / complete / submit-if-complete.
 	if len(m.suggestions) > 0 {
 		switch msg.String() {

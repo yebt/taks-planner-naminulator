@@ -24,7 +24,8 @@ func (stubProvider) Chat(context.Context, []llm.Message, []llm.Tool) (llm.Respon
 	return llm.Response{Content: "ok"}, nil
 }
 
-func newTestModel(t *testing.T) (*chatModel, store.TaskStore) {
+// newTestModel takes a testing.TB so benchmarks can build a model too.
+func newTestModel(t testing.TB) (*chatModel, store.TaskStore) {
 	t.Helper()
 	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {

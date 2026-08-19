@@ -60,11 +60,23 @@ func RunChat(deps ChatDeps) error {
 	return err
 }
 
-func newChatModel(deps ChatDeps) *chatModel {
+// newInputArea builds an input textarea. Both the real one and the scratch twin
+// that measures wrapping come from here, because a difference between them
+// would be a difference in wrapping — and the whole point of the twin is that
+// there is none.
+func newInputArea() textarea.Model {
 	ta := textarea.New()
-	ta.Placeholder = "tell me what you're working on…  (/ for commands)"
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
+	// The box is grown by layout(), so the library's own 99-row ceiling must not
+	// clamp it first on a tall terminal.
+	ta.MaxHeight = 0
+	return ta
+}
+
+func newChatModel(deps ChatDeps) *chatModel {
+	ta := newInputArea()
+	ta.Placeholder = "tell me what you're working on…  (/ for commands)"
 	// Enter submits; Alt+Enter inserts a newline (multi-line input).
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "newline"))
 	ta.Focus()
@@ -72,6 +84,7 @@ func newChatModel(deps ChatDeps) *chatModel {
 	m := &chatModel{
 		deps:    deps,
 		ta:      ta,
+		scratch: newInputArea(),
 		vp:      viewport.New(80, 20),
 		histPos: -1,
 	}
