@@ -51,18 +51,7 @@ func (m *chatModel) saveFavorite(name string) {
 	if strings.TrimSpace(name) == "" {
 		name = prov + ":" + model
 	}
-	fav := config.Favorite{Name: name, Provider: prov, Model: model}
-	replaced := false
-	for i, f := range m.deps.Cfg.Favorites {
-		if strings.EqualFold(f.Name, name) {
-			m.deps.Cfg.Favorites[i] = fav
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		m.deps.Cfg.Favorites = append(m.deps.Cfg.Favorites, fav)
-	}
+	m.deps.Cfg.SetFavorite(config.Favorite{Name: name, Provider: prov, Model: model})
 	if err := config.Save(m.deps.ConfigPath, *m.deps.Cfg); err != nil {
 		m.add("err", "save failed: "+err.Error())
 		return

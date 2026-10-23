@@ -47,6 +47,10 @@ type configModel struct {
 	width    int
 	height   int
 
+	// picker is the OpenRouter catalog browser. While it is open it owns every
+	// key, so the section underneath cannot move behind it.
+	picker *modelPicker
+
 	// exit is what leaving this screen does. Standalone (`planner config`) that
 	// is tea.Quit; embedded in the chat it reports back instead, because
 	// quitting there would take the conversation down with it. It is a
@@ -128,18 +132,40 @@ func (m *configModel) providerFields() []cfgField {
 // providerDetailFields is the drill-in view for one provider.
 func (m *configModel) providerDetailFields(name string) []cfgField {
 	n := name
-	return []cfgField{
+	fields := []cfgField{
 		{label: "model",
 			get: func() string { return m.cfg.Providers[n].Model },
 			set: func(v string) { pc := m.cfg.Providers[n]; pc.Model = strings.TrimSpace(v); m.cfg.Providers[n] = pc }},
 		{label: "api key", secret: true,
 			get: func() string { return m.cfg.Providers[n].APIKey },
 			set: func(v string) { pc := m.cfg.Providers[n]; pc.APIKey = strings.TrimSpace(v); m.cfg.Providers[n] = pc }},
-		{label: "✓ set as active provider", action: func() string {
+	}
+	// Only OpenRouter publishes a catalog we can browse; for the rest the model
+	// is whatever their own docs say, so there is nothing to list.
+	if m.cfg.Providers[n].Kind == "openrouter" {
+		fields = append(fields, cfgField{
+			label:  "↻ browse OpenRouter models",
+			action: func() string { return m.openModelPicker(n) },
+		})
+	}
+	fields = append(fields,
+		// One key can reach many models, so the model alone is not a choice the
+		// user wants to retype. Saving it under an alias makes it a /fav away.
+		cfgField{label: "★ save as favorite",
+			get: func() string { return favoriteAlias(m.cfg.Providers[n].Model) },
+			set: func(v string) {
+				alias := strings.TrimSpace(v)
+				if alias == "" {
+					return
+				}
+				m.cfg.SetFavorite(config.Favorite{Name: alias, Provider: n, Model: m.cfg.Providers[n].Model})
+			}},
+		cfgField{label: "✓ set as active provider", action: func() string {
 			m.cfg.ActiveProvider = n
 			return n + " is now active — press s to save"
 		}},
-	}
+	)
+	return fields
 }
 
 // providerRowLabel shows the active marker (▸), a key marker (● set / ○ unset),
@@ -302,6 +328,9 @@ func (m *configModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Width = msg.Width - 6
 		return m, nil
 	case tea.KeyMsg:
+		if m.picker != nil {
+			return m.updatePicker(msg)
+		}
 		if m.editing {
 			return m.updateEditing(msg)
 		}
@@ -422,6 +451,13 @@ func (m *configModel) save() {
 func (m *configModel) View() string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("planner · config") + "\n\n")
+	if m.picker != nil {
+		b.WriteString(m.viewPicker())
+		if m.status != "" {
+			b.WriteString("\n\n" + botLabel.Render(m.status))
+		}
+		return b.String()
+	}
 	if m.section == -1 {
 		b.WriteString(m.viewMenu())
 	} else {

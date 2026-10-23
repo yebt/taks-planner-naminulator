@@ -14,6 +14,7 @@ package wiring
 
 import (
 	"github.com/webcloster-dev/planner/internal/config"
+	"github.com/webcloster-dev/planner/internal/openrouter"
 	"github.com/webcloster-dev/planner/internal/plane"
 	"github.com/webcloster-dev/planner/internal/store"
 	"github.com/webcloster-dev/planner/internal/telegram"
@@ -36,6 +37,13 @@ func PlaneSyncer(cfg config.Config, st store.TaskStore) *plane.Syncer {
 	s := plane.NewSyncer(PlaneClient(cfg), st, cfg.Plane.StateDefaults)
 	s.SetEstimate(cfg.Plane.DefaultEstimate)
 	return s
+}
+
+// OpenRouterClient builds the read-only OpenRouter catalog client, keyed with
+// the openrouter provider's API key when one is set. The catalog is public, so
+// a missing key narrows the listing rather than breaking it.
+func OpenRouterClient(cfg config.Config) *openrouter.Client {
+	return openrouter.New(openrouter.Config{Token: cfg.Providers["openrouter"].APIKey})
 }
 
 // TelegramClient builds the Telegram client used to deliver daily digests and

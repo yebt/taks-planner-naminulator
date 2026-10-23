@@ -24,8 +24,15 @@ func TestProviderFieldsDrillIn(t *testing.T) {
 	if m.provider == "" {
 		t.Fatal("drilling in should set m.provider")
 	}
-	if len(m.fields) != 3 { // model, api key, activate
-		t.Fatalf("provider detail should have 3 fields, got %d", len(m.fields))
+	// model, api key, save as favorite, activate — plus the catalog browser on
+	// the one provider that has a catalog, so the count is named per provider
+	// rather than left to depend on which name sorts last.
+	want := map[string]int{"groq": 4, "openrouter": 5}[m.provider]
+	if want == 0 {
+		t.Fatalf("unexpected provider drilled into: %q", m.provider)
+	}
+	if len(m.fields) != want {
+		t.Fatalf("%s detail should have %d fields, got %d", m.provider, want, len(m.fields))
 	}
 }
 

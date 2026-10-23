@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/webcloster-dev/planner/internal/llm"
 )
@@ -110,12 +111,15 @@ func Default() Config {
 		ContextBudget:  DefaultContextBudget,
 		Plane:          PlaneConfig{BaseURL: DefaultPlaneBaseURL},
 		Providers: map[string]llm.ProviderConfig{
-			"ollama":   {Kind: "custom", Label: "ollama", BaseURL: "http://localhost:11434/v1", APIKey: "ollama", Model: "llama3.1"},
-			"openai":   {Kind: "openai", Label: "openai", Model: "gpt-4o-mini"},
-			"moonshot": {Kind: "moonshot", Label: "moonshot", Model: "moonshot-v1-8k"},
-			"kimi":     {Kind: "kimi", Label: "kimi", Model: "kimi-k2-0711-preview"},
-			"groq":     {Kind: "groq", Label: "groq", Model: "llama-3.3-70b-versatile"},
-			"claude":   {Kind: "claude", Label: "claude", Model: "claude-opus-4-8"},
+			"ollama": {Kind: "custom", Label: "ollama", BaseURL: "http://localhost:11434/v1", APIKey: "ollama", Model: "llama3.1"},
+			"openai": {Kind: "openai", Label: "openai", Model: "gpt-4o-mini"},
+			// One key, the whole catalog: pick the model from the config
+			// screen's browser rather than typing an id from memory.
+			"openrouter": {Kind: "openrouter", Label: "openrouter", Model: llm.OpenRouterDefaultModel},
+			"moonshot":   {Kind: "moonshot", Label: "moonshot", Model: "moonshot-v1-8k"},
+			"kimi":       {Kind: "kimi", Label: "kimi", Model: "kimi-k2-0711-preview"},
+			"groq":       {Kind: "groq", Label: "groq", Model: "llama-3.3-70b-versatile"},
+			"claude":     {Kind: "claude", Label: "claude", Model: "claude-opus-4-8"},
 		},
 	}
 }
@@ -223,4 +227,17 @@ func Save(path string, c Config) error {
 	}
 	tmpName = "" // renamed: nothing left to clean up
 	return nil
+}
+
+// SetFavorite stores a favorite, replacing any existing one with the same name
+// (case-insensitively). An alias is a handle the user types, so re-saving one
+// has to mean "point it somewhere else", never "now there are two".
+func (c *Config) SetFavorite(f Favorite) {
+	for i, existing := range c.Favorites {
+		if strings.EqualFold(existing.Name, f.Name) {
+			c.Favorites[i] = f
+			return
+		}
+	}
+	c.Favorites = append(c.Favorites, f)
 }

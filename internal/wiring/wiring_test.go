@@ -52,3 +52,11 @@ func TestTelegramClientConfigured(t *testing.T) {
 		t.Fatal("populated config should build a configured Telegram client")
 	}
 }
+
+// The openrouter entry may be absent (a config written before it existed, or a
+// zero value in a test), so the lookup must survive a nil provider map.
+func TestOpenRouterClientSurvivesAConfigWithoutProviders(t *testing.T) {
+	if OpenRouterClient(config.Config{}) == nil {
+		t.Fatal("a zero config should still build a catalog client")
+	}
+}

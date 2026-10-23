@@ -170,3 +170,36 @@ func TestSaveLeavesNoTempFiles(t *testing.T) {
 		t.Fatalf("unexpected leftovers in config dir: %v", names)
 	}
 }
+
+func TestDefaultShipsOpenRouterPreconfigured(t *testing.T) {
+	pc, ok := Default().Providers["openrouter"]
+	if !ok {
+		t.Fatal("openrouter is missing from the default providers")
+	}
+	if pc.Kind != "openrouter" {
+		t.Fatalf("openrouter kind is %q", pc.Kind)
+	}
+	if pc.Model == "" {
+		t.Fatal("a preconfigured provider must ship a working model")
+	}
+}
+
+// An existing config written before openrouter existed must gain it on load —
+// otherwise the entry only reaches users who delete their config file.
+func TestLoadHealsAConfigWrittenBeforeOpenRouter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	old := `{"active_provider":"groq","providers":{"groq":{"kind":"groq","model":"m"}}}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Providers["openrouter"]; !ok {
+		t.Fatal("openrouter was not added to an older config")
+	}
+	if c.Providers["groq"].Model != "m" {
+		t.Fatal("healing must not overwrite the user's own entries")
+	}
+}

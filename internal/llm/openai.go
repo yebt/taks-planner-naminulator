@@ -20,6 +20,7 @@ type OpenAICompatible struct {
 	baseURL string
 	apiKey  string
 	model   string
+	extra   http.Header // gateway-specific headers, see SetHeader
 	http    *http.Client
 }
 
@@ -44,6 +45,17 @@ func NewOpenAI(apiKey, model string) *OpenAICompatible {
 }
 
 func (o *OpenAICompatible) Name() string { return o.name }
+
+// SetHeader adds a header sent with every request. The dialect is shared, but
+// gateways layer their own headers on top of it — OpenRouter uses two for app
+// attribution. Headers required by the dialect itself are set afterwards, so an
+// extra can never displace Authorization or Content-Type.
+func (o *OpenAICompatible) SetHeader(key, value string) {
+	if o.extra == nil {
+		o.extra = http.Header{}
+	}
+	o.extra.Set(key, value)
+}
 
 type oaiMessage struct {
 	Role       string        `json:"role"`
@@ -126,6 +138,9 @@ func (o *OpenAICompatible) Chat(ctx context.Context, msgs []Message, tools []Too
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return Response{}, err
+	}
+	for k, vs := range o.extra {
+		httpReq.Header[k] = vs
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)

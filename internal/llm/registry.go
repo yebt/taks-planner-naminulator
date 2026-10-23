@@ -6,7 +6,7 @@ import "fmt"
 // It lives here (not in config) so both the config layer and the registry
 // share one shape.
 type ProviderConfig struct {
-	Kind    string `json:"kind"`               // openai | moonshot | kimi | groq | claude | custom
+	Kind    string `json:"kind"`               // openai | openrouter | moonshot | kimi | groq | claude | custom
 	Label   string `json:"label,omitempty"`    // display name / key for /model
 	BaseURL string `json:"base_url,omitempty"` // required for custom (e.g. Ollama)
 	APIKey  string `json:"api_key,omitempty"`
@@ -18,6 +18,8 @@ func Build(cfg ProviderConfig) (Provider, error) {
 	switch cfg.Kind {
 	case "openai":
 		return NewOpenAI(cfg.APIKey, cfg.Model), nil
+	case "openrouter":
+		return NewOpenRouter(cfg.APIKey, cfg.Model), nil
 	case "moonshot":
 		return NewMoonshot(cfg.APIKey, cfg.Model), nil
 	case "kimi":

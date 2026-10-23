@@ -248,7 +248,8 @@ move, `enter` selects and `esc` cancels.
 ```
 cmd/planner            entrypoint: chat · tui · config
 internal/domain        Task, TaskType, Status (our semantic layer over Plane states)
-internal/llm           Provider port + adapters (openai/moonshot/kimi/groq/claude/custom)
+internal/llm           Provider port + adapters (openai/openrouter/moonshot/kimi/
+                       groq/claude/custom)
 internal/store         TaskStore/ConversationStore/DailyStore ports + SQLite adapter (pure Go)
 internal/tools         LLM tool set → deterministic ops on the store
 internal/agent         tool-use loop + stateless Oneshot (for dailies)
@@ -256,11 +257,13 @@ internal/daily         the one owner of the digest format: prefixes, section
                        titles, the prompt spec, and the deterministic fallback
 internal/contextmgr    trims the LLM window to a char budget
 internal/memory        Engram long-term memory (CLI shell-out) or no-op
+internal/openrouter    read-only OpenRouter model catalog, so a model is picked
+                       from the real list instead of typed from memory
 internal/plane         Plane REST client + push/pull syncer
 internal/telegram      Telegram Bot API client (daily delivery) + 4096-char split
 internal/config        JSON config (providers, Plane, Telegram, favorites)
-internal/wiring        builds the Plane/Telegram adapters from config, so the
-                       entrypoint and the TUI stop duplicating that assembly
+internal/wiring        builds the Plane/Telegram/OpenRouter adapters from config,
+                       so the entrypoint and the TUI stop duplicating that assembly
 internal/tui           Bubbletea chat harness + config TUI
 ```
 
