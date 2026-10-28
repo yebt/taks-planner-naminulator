@@ -83,6 +83,7 @@ type MCPServer struct {
 	Env      map[string]string `json:"env,omitempty"`   // added on top of the planner's own environment
 	Tools    []string          `json:"tools,omitempty"` // allowlist of tool names; empty = all
 	Disabled bool              `json:"disabled,omitempty"`
+	Hint     string            `json:"hint,omitempty"` // extra guidance for the model, added to the system prompt
 }
 
 // Config is the top-level app config.

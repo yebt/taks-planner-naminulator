@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/webcloster-dev/planner/internal/agent"
+	"github.com/webcloster-dev/planner/internal/mcp"
 )
 
 func (m *chatModel) submit() (tea.Model, tea.Cmd) {
@@ -118,9 +119,18 @@ func (m *chatModel) renderToolEvents() {
 		case "send_daily":
 			m.add("tool", "✈ daily "+tag+" sent")
 		default:
-			m.add("tool", "· "+ev.Name)
+			m.add("tool", toolEventLabel(ev.Name))
 		}
 	}
+}
+
+// toolEventLabel is the generic echo for a tool without its own case. An MCP
+// tool ("plane__workitem") reads as "plane: workitem".
+func toolEventLabel(name string) string {
+	if server, tool, ok := mcp.SplitToolName(name); ok {
+		return "· " + server + ": " + tool
+	}
+	return "· " + name
 }
 
 // --- input history ---

@@ -32,7 +32,7 @@ Subcommands:
 Files (under `~/.config/planner/`, override the config path with
 `PLANNER_CONFIG`):
 
-- `config.json` — providers, keys, Plane, Telegram, favorites
+- `config.json` — providers, keys, Plane, Telegram, favorites, MCP servers
 - `planner.db` — SQLite: tasks, conversations, dailies
 
 ---
@@ -73,6 +73,42 @@ Built-in providers: `ollama` (local, default, free), `openai`, `moonshot`,
 
 Fill **bot token**, **chat id**, optional **thread id**, then run
 **✈ send test notification** to confirm delivery end-to-end.
+
+### MCP servers
+
+The chat agent can also use tools from stdio [MCP](https://modelcontextprotocol.io)
+servers. They are not in the config TUI yet: add them to `config.json` under
+`mcp_servers` (name → server):
+
+```json
+"mcp_servers": {
+  "plane": {
+    "command": "uvx",
+    "args": ["plane-mcp-server", "stdio"],
+    "env": {
+      "PLANE_API_KEY": "<your-api-key>",
+      "PLANE_BASE_URL": "https://plane.example.com",
+      "PLANE_WORKSPACE_SLUG": "<your-workspace>"
+    },
+    "hint": "Self-hosted Plane v1.2.0: workspace-scope calls return 404; always pass project_id."
+  }
+}
+```
+
+- **name** — letters, digits and `-` only (max 24). It prefixes the server's
+  tools: `plane__workitem`. Built-in tools win any name clash.
+- **command / args** — the process to launch; it speaks MCP over stdin/stdout.
+- **env** — added on top of the planner's environment. It may hold secrets: it
+  lives only in the `0600` config file and is never logged or shown.
+- **tools** — optional allowlist of the server's tool names; empty = all.
+- **hint** — optional guidance added to the system prompt, next to the
+  server's own instructions.
+- **disabled** — `true` keeps the entry but does not start it.
+
+Servers start with the chat (up to 30 s each; `uvx` may download the server on
+first run). One that is misnamed or fails to start is skipped with a warning
+shown in the chat on startup — the chat still works.
+MCP tool calls show in the transcript as `· plane: workitem`.
 
 ---
 
@@ -261,8 +297,10 @@ internal/openrouter    read-only OpenRouter model catalog, so a model is picked
                        from the real list instead of typed from memory
 internal/plane         Plane REST client + push/pull syncer
 internal/telegram      Telegram Bot API client (daily delivery) + 4096-char split
-internal/config        JSON config (providers, Plane, Telegram, favorites)
-internal/wiring        builds the Plane/Telegram/OpenRouter adapters from config,
+internal/config        JSON config (providers, Plane, Telegram, favorites, MCP)
+internal/mcp           stdio MCP client + dispatcher merging MCP tools with the
+                       built-in ones (namespaced <server>__<tool>)
+internal/wiring        builds the Plane/Telegram/OpenRouter/MCP adapters from config,
                        so the entrypoint and the TUI stop duplicating that assembly
 internal/tui           Bubbletea chat harness + config TUI
 ```

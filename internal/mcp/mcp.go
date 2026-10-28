@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -25,11 +26,21 @@ const Separator = "__"
 // maxToolName is the provider limit for tool names (^[a-zA-Z0-9_-]{1,64}$).
 const maxToolName = 64
 
+// serverName is what a configured server name must match: no underscores, so
+// the "__" separator can only ever come from ToolName, and short enough to
+// leave room for the tool name within the 64-char limit.
+var serverName = regexp.MustCompile(`^[a-zA-Z0-9-]{1,24}$`)
+
+// ValidServerName reports whether name can be used as a tool-name prefix.
+func ValidServerName(name string) bool { return serverName.MatchString(name) }
+
 // Client is one live session with an MCP server.
 type Client struct {
-	name    string
-	allow   map[string]bool // empty = every tool is exposed
-	session *sdk.ClientSession
+	name         string
+	hint         string          // configured guidance for the model
+	instructions string          // what the server sent at initialize
+	allow        map[string]bool // empty = every tool is exposed
+	session      *sdk.ClientSession
 	// original maps the exposed (sanitized) tool name back to the server's
 	// own name, so Call works with whatever Tools handed to the model.
 	mu       sync.Mutex
@@ -48,7 +59,12 @@ func Connect(ctx context.Context, name string, srv config.MCPServer) (*Client, e
 	for k, v := range srv.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
-	return connect(ctx, name, srv.Tools, &sdk.CommandTransport{Command: cmd})
+	c, err := connect(ctx, name, srv.Tools, &sdk.CommandTransport{Command: cmd})
+	if err != nil {
+		return nil, err
+	}
+	c.hint = srv.Hint
+	return c, nil
 }
 
 // connect opens a session over any transport (tests use the in-memory one).
@@ -59,6 +75,9 @@ func connect(ctx context.Context, name string, allow []string, t sdk.Transport) 
 		return nil, fmt.Errorf("mcp server %q: connect: %w", name, err)
 	}
 	c := &Client{name: name, session: session, original: map[string]string{}}
+	if res := session.InitializeResult(); res != nil {
+		c.instructions = res.Instructions
+	}
 	if len(allow) > 0 {
 		c.allow = make(map[string]bool, len(allow))
 		for _, a := range allow {
@@ -71,10 +90,20 @@ func connect(ctx context.Context, name string, allow []string, t sdk.Transport) 
 // Name is the configured server name (the tool-name prefix).
 func (c *Client) Name() string { return c.name }
 
+// Hint is the configured guidance for the model ("" when none).
+func (c *Client) Hint() string { return c.hint }
+
+// Instructions is what the server said about itself at initialize ("" when
+// it sent nothing).
+func (c *Client) Instructions() string { return c.instructions }
+
 // Tools lists the server's tools (every page), keeps the allowlisted ones and
-// returns them namespaced with an object input schema.
+// returns them namespaced with an object input schema. Two tools that map to
+// the same exposed name are not both emitted: the first listed wins, so the
+// name always resolves to the tool the model was shown.
 func (c *Client) Tools(ctx context.Context) ([]llm.Tool, error) {
 	var out []llm.Tool
+	seen := map[string]bool{}
 	for t, err := range c.session.Tools(ctx, nil) {
 		if err != nil {
 			return nil, fmt.Errorf("mcp server %q: list tools: %w", c.name, err)
@@ -83,6 +112,10 @@ func (c *Client) Tools(ctx context.Context) ([]llm.Tool, error) {
 			continue
 		}
 		full := ToolName(c.name, t.Name)
+		if seen[full] {
+			continue
+		}
+		seen[full] = true
 		_, short, _ := SplitToolName(full)
 		c.mu.Lock()
 		c.original[short] = t.Name

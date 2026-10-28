@@ -188,3 +188,85 @@ func TestSplitToolName(t *testing.T) {
 		})
 	}
 }
+
+// startClient connects a Client named name to an already populated SDK server
+// over the in-memory transport.
+func startClient(t *testing.T, name string, srv *sdk.Server, allow []string) *Client {
+	t.Helper()
+	ctx := context.Background()
+	serverT, clientT := sdk.NewInMemoryTransports()
+	ss, err := srv.Connect(ctx, serverT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.Close() })
+	c, err := connect(ctx, name, allow, clientT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
+// textTool adds a tool that always answers with the given text.
+func textTool(srv *sdk.Server, name, text string) {
+	srv.AddTool(&sdk.Tool{Name: name, InputSchema: json.RawMessage(`{"type":"object"}`)},
+		func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: text}}}, nil
+		})
+}
+
+// Two server tools that sanitize to the same exposed name must not both be
+// emitted: the first one listed wins, and Call reaches that same tool.
+func TestToolsSkipDuplicateExposedNames(t *testing.T) {
+	srv := sdk.NewServer(&sdk.Implementation{Name: "dup", Version: "v0"}, nil)
+	textTool(srv, "get.item", "dotted") // lists before "get_item" ('.' < '_')
+	textTool(srv, "get_item", "underscored")
+	c := startClient(t, "dup", srv, nil)
+	ctx := context.Background()
+	tools, err := c.Tools(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 1 || tools[0].Name != "dup__get_item" {
+		t.Fatalf("want one dup__get_item, got %+v", tools)
+	}
+	got, err := c.Call(ctx, "get_item", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "dotted" {
+		t.Fatalf("Call reached %q, want the first listed tool", got)
+	}
+}
+
+func TestInstructionsAreCaptured(t *testing.T) {
+	srv := sdk.NewServer(&sdk.Implementation{Name: "ins", Version: "v0"}, &sdk.ServerOptions{Instructions: "Use project ids."})
+	textTool(srv, "ping", "pong")
+	if got := startClient(t, "ins", srv, nil).Instructions(); got != "Use project ids." {
+		t.Fatalf("Instructions() = %q", got)
+	}
+}
+
+func TestValidServerName(t *testing.T) {
+	tests := []struct {
+		name, in string
+		want     bool
+	}{
+		{name: "plain", in: "plane", want: true},
+		{name: "digits and dash", in: "plane-2", want: true},
+		{name: "max length", in: strings.Repeat("a", 24), want: true},
+		{name: "empty", in: "", want: false},
+		{name: "too long", in: strings.Repeat("a", 25), want: false},
+		{name: "underscore could fake the separator", in: "a_b", want: false},
+		{name: "space", in: "my server", want: false},
+		{name: "dot", in: "a.b", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ValidServerName(tt.in); got != tt.want {
+				t.Fatalf("ValidServerName(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}

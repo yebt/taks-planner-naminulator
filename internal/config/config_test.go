@@ -213,6 +213,7 @@ func TestSaveLoadRoundtripsMCPServers(t *testing.T) {
 			Args:    []string{"plane-mcp-server", "stdio"},
 			Env:     map[string]string{"PLANE_API_KEY": "secret"},
 			Tools:   []string{"list_work_items"},
+			Hint:    "always pass project_id",
 		},
 		"off": {Command: "x", Disabled: true},
 	}
@@ -229,6 +230,9 @@ func TestSaveLoadRoundtripsMCPServers(t *testing.T) {
 	}
 	if got.Env["PLANE_API_KEY"] != "secret" || len(got.Tools) != 1 || got.Tools[0] != "list_work_items" {
 		t.Fatalf("mcp server env/tools not persisted: %+v", got)
+	}
+	if got.Hint != "always pass project_id" {
+		t.Fatalf("mcp server hint not persisted: %q", got.Hint)
 	}
 	if !out.MCPServers["off"].Disabled {
 		t.Fatal("mcp server disabled flag not persisted")

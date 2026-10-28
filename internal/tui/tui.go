@@ -50,6 +50,9 @@ type ChatDeps struct {
 	Activity   store.ActivityStore
 	Context    store.ContextStore
 	Build      func(cfg config.Config, name string) (llm.Provider, error)
+	// Warnings are startup notices (e.g. an MCP server that failed to
+	// connect) shown once in the chat.
+	Warnings []string
 }
 
 // RunChat starts the interactive harness. Mouse is captured for wheel scroll
@@ -107,5 +110,8 @@ func (m *chatModel) healthCheck() {
 	}
 	if m.deps.Telegram == nil || !m.deps.Telegram.Configured() {
 		m.add("warn", "Telegram not configured — you can build/edit dailies, but /daily send won't work until you set it in `planner config` → Telegram.")
+	}
+	for _, w := range m.deps.Warnings {
+		m.add("warn", w)
 	}
 }

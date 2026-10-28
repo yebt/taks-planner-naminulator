@@ -13,7 +13,14 @@
 package wiring
 
 import (
+	"context"
+	"fmt"
+	"sort"
+	"sync"
+	"time"
+
 	"github.com/webcloster-dev/planner/internal/config"
+	"github.com/webcloster-dev/planner/internal/mcp"
 	"github.com/webcloster-dev/planner/internal/openrouter"
 	"github.com/webcloster-dev/planner/internal/plane"
 	"github.com/webcloster-dev/planner/internal/store"
@@ -50,4 +57,59 @@ func OpenRouterClient(cfg config.Config) *openrouter.Client {
 // test notifications.
 func TelegramClient(cfg config.Config) *telegram.Client {
 	return telegram.New(cfg.Telegram.BotToken, cfg.Telegram.ChatID, cfg.Telegram.ThreadID)
+}
+
+// mcpConnectTimeout bounds each server's start-up handshake. It is generous
+// because uvx may download the server on its first run.
+const mcpConnectTimeout = 30 * time.Second
+
+// connectMCP is swapped in tests so no process is launched.
+var connectMCP = mcp.Connect
+
+// MCPClients connects every enabled, validly named MCP server concurrently.
+// A server that is misnamed or fails to start is skipped and described in a
+// warning — never fatal. Clients come back in name order; the caller closes
+// them. Warnings never carry env values.
+func MCPClients(ctx context.Context, cfg config.Config) ([]*mcp.Client, []string) {
+	names := make([]string, 0, len(cfg.MCPServers))
+	for name := range cfg.MCPServers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var warnings []string
+	clients := make([]*mcp.Client, len(names))
+	errs := make([]error, len(names))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		srv := cfg.MCPServers[name]
+		if srv.Disabled {
+			continue
+		}
+		if !mcp.ValidServerName(name) {
+			warnings = append(warnings, fmt.Sprintf(
+				"mcp server %q skipped: names may only use letters, digits and '-' (max 24)", name))
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cctx, cancel := context.WithTimeout(ctx, mcpConnectTimeout)
+			defer cancel()
+			clients[i], errs[i] = connectMCP(cctx, name, srv)
+		}()
+	}
+	wg.Wait()
+
+	var out []*mcp.Client
+	for i, c := range clients {
+		if errs[i] != nil {
+			warnings = append(warnings, fmt.Sprintf("mcp server %q skipped: %v", names[i], errs[i]))
+			continue
+		}
+		if c != nil {
+			out = append(out, c)
+		}
+	}
+	return out, warnings
 }

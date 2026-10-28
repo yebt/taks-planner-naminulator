@@ -3,15 +3,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/webcloster-dev/planner/internal/agent"
 	"github.com/webcloster-dev/planner/internal/config"
 	"github.com/webcloster-dev/planner/internal/contextmgr"
 	"github.com/webcloster-dev/planner/internal/daily"
 	"github.com/webcloster-dev/planner/internal/llm"
+	"github.com/webcloster-dev/planner/internal/mcp"
 	"github.com/webcloster-dev/planner/internal/memory"
 	"github.com/webcloster-dev/planner/internal/store"
 	"github.com/webcloster-dev/planner/internal/tools"
@@ -156,7 +159,20 @@ func runChat() error {
 	syncer := wiring.PlaneSyncer(cfg, st)
 	reg.SetSyncer(syncer)
 
-	ag := agent.New(provider, reg, systemPrompt)
+	// MCP servers extend the built-in tools; the TUI keeps the concrete
+	// registry for its setters, only the agent sees the composite.
+	ctx := context.Background()
+	clients, warnings := wiring.MCPClients(ctx, cfg)
+	defer func() {
+		for _, c := range clients {
+			_ = c.Close()
+		}
+	}()
+	listCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	dispatcher, listWarnings := mcp.NewDispatcher(listCtx, reg, clients)
+	cancel()
+
+	ag := agent.New(provider, dispatcher, systemPrompt+dispatcher.PromptSection())
 	ag.SetWindow(contextmgr.New(cfg.ContextBudget))
 
 	tg := wiring.TelegramClient(cfg)
@@ -177,6 +193,7 @@ func runChat() error {
 		Activity:   st,
 		Context:    st,
 		Build:      buildProvider,
+		Warnings:   append(warnings, listWarnings...),
 	})
 }
 

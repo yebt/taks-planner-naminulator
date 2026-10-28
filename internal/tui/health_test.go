@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -35,4 +36,16 @@ func TestHealthCheckAlert(t *testing.T) {
 	if !hasRole(m2.entries, "warn") {
 		t.Fatal("expected warnings for unconfigured Plane/Telegram")
 	}
+}
+
+func TestHealthCheckSurfacesStartupWarnings(t *testing.T) {
+	cfg := config.Default()
+	m := &chatModel{deps: ChatDeps{Cfg: &cfg, Warnings: []string{"mcp server \"plane\": connect failed"}}, vp: viewport.New(80, 20)}
+	m.healthCheck()
+	for _, e := range m.entries {
+		if e.role == "warn" && strings.Contains(e.text, `"plane": connect failed`) {
+			return
+		}
+	}
+	t.Fatal("expected the startup warning to be shown in the chat")
 }
