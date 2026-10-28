@@ -74,6 +74,17 @@ type MemoryConfig struct {
 	Project string `json:"project,omitempty"` // engram project; empty = autodetect from cwd
 }
 
+// MCPServer describes a stdio MCP server the chat agent can use tools from.
+// Env may hold secrets (API keys): it lives only in the 0600 config file and
+// must never be logged or rendered.
+type MCPServer struct {
+	Command  string            `json:"command,omitempty"`
+	Args     []string          `json:"args,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`   // added on top of the planner's own environment
+	Tools    []string          `json:"tools,omitempty"` // allowlist of tool names; empty = all
+	Disabled bool              `json:"disabled,omitempty"`
+}
+
 // Config is the top-level app config.
 type Config struct {
 	ActiveProvider string                        `json:"active_provider"`
@@ -84,6 +95,7 @@ type Config struct {
 	Plane          PlaneConfig                   `json:"plane"`
 	Telegram       TelegramConfig                `json:"telegram"`
 	Memory         MemoryConfig                  `json:"memory"`
+	MCPServers     map[string]MCPServer          `json:"mcp_servers,omitempty"` // name -> stdio MCP server
 }
 
 // ProvidersReady reports whether the active provider is usable (custom/local

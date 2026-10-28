@@ -203,3 +203,34 @@ func TestLoadHealsAConfigWrittenBeforeOpenRouter(t *testing.T) {
 		t.Fatal("healing must not overwrite the user's own entries")
 	}
 }
+
+func TestSaveLoadRoundtripsMCPServers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	in := Default()
+	in.MCPServers = map[string]MCPServer{
+		"plane": {
+			Command: "uvx",
+			Args:    []string{"plane-mcp-server", "stdio"},
+			Env:     map[string]string{"PLANE_API_KEY": "secret"},
+			Tools:   []string{"list_work_items"},
+		},
+		"off": {Command: "x", Disabled: true},
+	}
+	if err := Save(path, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.MCPServers["plane"]
+	if got.Command != "uvx" || len(got.Args) != 2 || got.Args[1] != "stdio" {
+		t.Fatalf("mcp server command/args not persisted: %+v", got)
+	}
+	if got.Env["PLANE_API_KEY"] != "secret" || len(got.Tools) != 1 || got.Tools[0] != "list_work_items" {
+		t.Fatalf("mcp server env/tools not persisted: %+v", got)
+	}
+	if !out.MCPServers["off"].Disabled {
+		t.Fatal("mcp server disabled flag not persisted")
+	}
+}
