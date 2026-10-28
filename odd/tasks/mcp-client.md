@@ -74,3 +74,7 @@ Feature done on `feat/mcp-client`; push/PR is the user's decision.
   Plane v1.2.0 (`workitem list`, `state list`, `workitem_activity list`); `project list`
   fails because it uses `/projects-lite/` (404).
 
+
+## Slices (stacked-to-main)
+- PR 1: `feat/mcp-client-core` → `main` — 4b70070 (client + config, 471 lines).
+- PR 2: `feat/mcp-client` → `feat/mcp-client-core` — 18b66f3 (dispatcher, wiring, TUI, docs).
