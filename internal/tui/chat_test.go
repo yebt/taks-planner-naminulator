@@ -186,3 +186,17 @@ func TestSubmitEndsHistoryNavigation(t *testing.T) {
 		})
 	}
 }
+
+func TestToolEventLabel(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{name: "mcp tool shows server and tool", in: "plane__workitem", want: "· plane: workitem"},
+		{name: "built-in name stays as is", in: "list_tasks", want: "· list_tasks"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := toolEventLabel(tt.in); got != tt.want {
+				t.Fatalf("toolEventLabel(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
